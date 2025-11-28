@@ -29,6 +29,9 @@ export default function Header() {
           <a href="#tools" className="hover:text-blue-600">
             Herramientas
           </a>
+          <a href="/dashboard" className="hover:text-blue-600">
+            Entrar
+          </a>
           <a
             href="#contact"
             className="rounded-full bg-blue-600 px-4 py-2 text-white hover:bg-blue-700"
