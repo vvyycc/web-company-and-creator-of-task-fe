@@ -252,7 +252,7 @@ export default function GeneratorPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {result.tasks.map((task) => (
+                  {result?.tasks?.map((task) => (
                     <tr key={task.id} className="hover:bg-slate-50">
                       <td className="px-4 py-2 font-semibold text-slate-900">{task.title}</td>
                       <td className="px-4 py-2 text-slate-700">{task.description}</td>
