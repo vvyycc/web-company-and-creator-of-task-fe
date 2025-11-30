@@ -297,32 +297,6 @@ export default function GeneratorPage() {
             </div>
 
             <div className="overflow-x-auto">
-<<<<<<< HEAD
-              <table className="min-w-full divide-y divide-slate-200 text-left text-sm">
-                <thead className="bg-slate-50">
-                  <tr>
-                    <th className="px-4 py-2 font-semibold text-slate-700">Título</th>
-                    <th className="px-4 py-2 font-semibold text-slate-700">Descripción</th>
-                    <th className="px-4 py-2 font-semibold text-slate-700">Categoría</th>
-                    <th className="px-4 py-2 font-semibold text-slate-700">Complejidad</th>
-                    <th className="px-4 py-2 font-semibold text-slate-700">Prioridad</th>
-                    <th className="px-4 py-2 font-semibold text-slate-700">Horas</th>
-                    <th className="px-4 py-2 font-semibold text-slate-700">Tarifa</th>
-                    <th className="px-4 py-2 font-semibold text-slate-700">Precio</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {result?.tasks?.map((task) => (
-                    <tr key={task.id} className="hover:bg-slate-50">
-                      <td className="px-4 py-2 font-semibold text-slate-900">{task.title}</td>
-                      <td className="px-4 py-2 text-slate-700">{task.description}</td>
-                      <td className="px-4 py-2 text-slate-700">{task.category}</td>
-                      <td className="px-4 py-2 text-slate-700">{task.complexity}</td>
-                      <td className="px-4 py-2 text-slate-700">{task.priority}</td>
-                      <td className="px-4 py-2 text-slate-700">{task.estimatedHours}</td>
-                      <td className="px-4 py-2 text-slate-700">{task.hourlyRate.toFixed(2)} € / h</td>
-                      <td className="px-4 py-2 text-slate-900">{formatPrice(task.taskPrice)}</td>
-=======
               {result && result.tasks && result.tasks.length > 0 && (
                 <table className="min-w-full divide-y divide-slate-200 text-left text-sm">
                   <thead className="bg-slate-50">
@@ -335,7 +309,6 @@ export default function GeneratorPage() {
                       <th className="px-4 py-2 font-semibold text-slate-700">Horas</th>
                       <th className="px-4 py-2 font-semibold text-slate-700">Tarifa</th>
                       <th className="px-4 py-2 font-semibold text-slate-700">Precio</th>
->>>>>>> 47441629d96fd4615d18a60e973e96183fc7ffac
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
