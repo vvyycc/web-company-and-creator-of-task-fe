@@ -1,5 +1,6 @@
-import { FormEvent, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { signIn, useSession } from 'next-auth/react';
+import { useRouter } from 'next/router';
 
 type TaskComplexity = 'SIMPLE' | 'MEDIUM' | 'HIGH';
 
@@ -32,82 +33,132 @@ interface ProjectEstimation {
 
 export default function GeneratorPage() {
   const { data: session, status } = useSession();
+  const router = useRouter();
   const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:4000';
   const [projectTitle, setProjectTitle] = useState('');
   const [projectDescription, setProjectDescription] = useState('');
   const [ownerEmail, setOwnerEmail] = useState('');
   const [result, setResult] = useState<ProjectEstimation | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [isPaying, setIsPaying] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [isSubscriptionModalOpen, setSubscriptionModalOpen] = useState(false);
+  const [hasActiveSubscription, setHasActiveSubscription] = useState<boolean | null>(null);
+  const [stripeError, setStripeError] = useState<string | null>(null);
+
+  const effectiveOwnerEmail = ownerEmail || (session?.user?.email as string) || '';
 
   const formatPrice = (value: number) =>
     new Intl.NumberFormat('es-ES', { style: 'currency', currency: 'EUR' }).format(value);
 
-  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    setIsLoading(true);
-    setError(null);
-    setResult(null);
+  useEffect(() => {
+    if (!effectiveOwnerEmail) return;
 
+    const checkSubscription = async () => {
+      try {
+        const res = await fetch(
+          `${API_BASE}/billing/me-subscription?email=${encodeURIComponent(effectiveOwnerEmail)}`
+        );
+        const data = await res.json();
+        setHasActiveSubscription(data.hasActiveSubscription);
+      } catch (err) {
+        console.error('[generator] Error checking subscription', err);
+        setHasActiveSubscription(false);
+      }
+    };
+
+    checkSubscription();
+  }, [API_BASE, effectiveOwnerEmail]);
+
+  const actuallyGenerateTasks = useCallback(async () => {
     try {
-      const response = await fetch(`${API_BASE}/projects/generate-tasks`, {
+      setIsLoading(true);
+      setError(null);
+      setResult(null);
+      const res = await fetch(`${API_BASE}/projects/generate-tasks`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           projectTitle,
           projectDescription,
-          ownerEmail: ownerEmail || session?.user?.email,
+          ownerEmail: effectiveOwnerEmail,
         }),
       });
 
-      if (!response.ok) {
-        throw new Error('No se pudo generar el proyecto. Inténtalo de nuevo.');
+      if (res.status === 402) {
+        const data = await res.json();
+        setSubscriptionModalOpen(true);
+        setStripeError(data.message || 'Necesitas una suscripción activa para generar tareas.');
+        return;
       }
 
-      const data = (await response.json()) as ProjectEstimation;
+      if (!res.ok) {
+        throw new Error('No se pudo generar el troceado');
+      }
+
+      const data: ProjectEstimation = await res.json();
       setResult(data);
     } catch (err: any) {
+      console.error('[generator] Error generating tasks', err);
       setError(err.message || 'Error al generar tareas.');
     } finally {
       setIsLoading(false);
     }
+  }, [API_BASE, effectiveOwnerEmail, projectDescription, projectTitle]);
+
+  const handleGenerate = async () => {
+    setStripeError(null);
+
+    if (!hasActiveSubscription) {
+      setSubscriptionModalOpen(true);
+      return;
+    }
+
+    await actuallyGenerateTasks();
   };
 
-  const handlePayGeneratorFee = async () => {
-    setIsPaying(true);
-    setError(null);
-
+  const handlePublishToCommunity = async () => {
+    if (!result) return;
     try {
-      const response = await fetch(`${API_BASE}/stripe/checkout-session`, {
+      const res = await fetch(`${API_BASE}/community/projects`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          ownerEmail: ownerEmail || session?.user?.email,
+          ownerEmail: effectiveOwnerEmail,
+          projectTitle: result.projectTitle,
+          projectDescription: result.projectDescription,
+          estimation: result,
         }),
       });
 
-      if (!response.ok) {
-        throw new Error('No se pudo iniciar el pago en Stripe.');
-      }
+      if (!res.ok) throw new Error('No se pudo publicar el proyecto');
 
-      const sessionData = await response.json();
-
-      if (sessionData?.url) {
-        window.location.href = sessionData.url;
-      } else {
-        throw new Error('No se obtuvo la URL de pago de Stripe.');
-      }
-    } catch (err: any) {
-      setError(err.message || 'Error al procesar el pago.');
-    } finally {
-      setIsPaying(false);
+      // TODO: mostrar mensaje de éxito o redirigir
+    } catch (err) {
+      console.error('[generator] Error publishing project', err);
+      setError('No se pudo publicar el proyecto');
     }
   };
+
+  useEffect(() => {
+    if (router.query.status === 'subscription_success' && effectiveOwnerEmail) {
+      const refreshSubscription = async () => {
+        try {
+          const res = await fetch(
+            `${API_BASE}/billing/me-subscription?email=${encodeURIComponent(effectiveOwnerEmail)}`
+          );
+          const data = await res.json();
+          setHasActiveSubscription(data.hasActiveSubscription);
+          if (data.hasActiveSubscription && projectTitle && projectDescription) {
+            await actuallyGenerateTasks();
+          }
+        } catch (err) {
+          console.error('[generator] Error refreshing subscription after checkout', err);
+        }
+      };
+
+      refreshSubscription();
+    }
+  }, [API_BASE, actuallyGenerateTasks, effectiveOwnerEmail, projectDescription, projectTitle, router.query.status]);
 
   if (status === 'loading') {
     return (
@@ -144,16 +195,22 @@ export default function GeneratorPage() {
           <h1 className="text-3xl font-bold text-slate-900">Generador de tareas y presupuesto</h1>
           <p className="text-slate-600">
             Divide tu proyecto en tareas con prioridad, capa técnica y precio estimado. La tarifa base de trabajo es de
-            30 €/h. La plataforma cobra un 1% de comisión sobre el presupuesto del proyecto y el servicio de generación
-            y troceado tiene un fee fijo de 30 €.
+            30 €/h, la plataforma cobra un 1% de comisión sobre el presupuesto del proyecto y el servicio de generación
+            y troceado está disponible con una suscripción de 30 €/mes.
           </p>
           <p className="text-sm text-slate-600">
-            Te mostraremos el desglose completo de tareas, horas y precios antes de que realices el pago del servicio de
-            generación.
+            Te mostraremos el desglose completo de tareas, horas y precios con desglose de comisiones y tarifas. La
+            plataforma actúa como intermediaria entre clientes y programadores.
           </p>
         </div>
 
-        <form onSubmit={handleSubmit} className="grid gap-6 rounded-xl border border-slate-200 p-6">
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            handleGenerate();
+          }}
+          className="grid gap-6 rounded-xl border border-slate-200 p-6"
+        >
           <div className="flex flex-col gap-2">
             <label className="text-sm font-semibold text-slate-800" htmlFor="title">
               Título del proyecto
@@ -205,8 +262,8 @@ export default function GeneratorPage() {
 
           <div className="flex flex-col gap-4 rounded-lg bg-slate-50 p-4 text-sm text-slate-700">
             <p>
-              Este servicio tiene un precio fijo de <strong>30 €</strong> por convertir tu idea en un plan detallado de
-              trabajo.
+              Este servicio está disponible mediante una suscripción de <strong>30 €/mes</strong> para convertir tu idea
+              en un plan detallado de trabajo.
             </p>
             <p>
               La tarifa técnica base es de <strong>30 €/h</strong> y la plataforma aplicará un <strong>1%</strong> de
@@ -222,7 +279,9 @@ export default function GeneratorPage() {
             {isLoading ? 'Generando tareas…' : 'Generar tareas'}
           </button>
 
-          {error && <p className="text-sm text-red-600">{error}</p>}
+          {(error || stripeError) && (
+            <p className="text-sm text-red-600">{error || stripeError}</p>
+          )}
         </form>
 
         {result && (
@@ -238,6 +297,7 @@ export default function GeneratorPage() {
             </div>
 
             <div className="overflow-x-auto">
+<<<<<<< HEAD
               <table className="min-w-full divide-y divide-slate-200 text-left text-sm">
                 <thead className="bg-slate-50">
                   <tr>
@@ -262,10 +322,38 @@ export default function GeneratorPage() {
                       <td className="px-4 py-2 text-slate-700">{task.estimatedHours}</td>
                       <td className="px-4 py-2 text-slate-700">{task.hourlyRate.toFixed(2)} € / h</td>
                       <td className="px-4 py-2 text-slate-900">{formatPrice(task.taskPrice)}</td>
+=======
+              {result && result.tasks && result.tasks.length > 0 && (
+                <table className="min-w-full divide-y divide-slate-200 text-left text-sm">
+                  <thead className="bg-slate-50">
+                    <tr>
+                      <th className="px-4 py-2 font-semibold text-slate-700">Título</th>
+                      <th className="px-4 py-2 font-semibold text-slate-700">Descripción</th>
+                      <th className="px-4 py-2 font-semibold text-slate-700">Categoría</th>
+                      <th className="px-4 py-2 font-semibold text-slate-700">Complejidad</th>
+                      <th className="px-4 py-2 font-semibold text-slate-700">Prioridad</th>
+                      <th className="px-4 py-2 font-semibold text-slate-700">Horas</th>
+                      <th className="px-4 py-2 font-semibold text-slate-700">Tarifa</th>
+                      <th className="px-4 py-2 font-semibold text-slate-700">Precio</th>
+>>>>>>> 47441629d96fd4615d18a60e973e96183fc7ffac
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {result?.tasks?.map((task) => (
+                      <tr key={task.id} className="hover:bg-slate-50">
+                        <td className="px-4 py-2 font-semibold text-slate-900">{task.title}</td>
+                        <td className="px-4 py-2 text-slate-700">{task.description}</td>
+                        <td className="px-4 py-2 text-slate-700">{task.category}</td>
+                        <td className="px-4 py-2 text-slate-700">{task.complexity}</td>
+                        <td className="px-4 py-2 text-slate-700">{task.priority}</td>
+                        <td className="px-4 py-2 text-slate-700">{task.estimatedHours}</td>
+                        <td className="px-4 py-2 text-slate-700">{task.hourlyRate.toFixed(2)} € / h</td>
+                        <td className="px-4 py-2 text-slate-900">{formatPrice(task.taskPrice)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
             </div>
 
             <div className="mt-6 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
@@ -288,15 +376,79 @@ export default function GeneratorPage() {
             </div>
 
             <button
-              onClick={handlePayGeneratorFee}
-              disabled={isPaying}
-              className="mt-4 w-full rounded-lg bg-blue-600 px-4 py-2 text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-300"
+              onClick={handlePublishToCommunity}
+              className="mt-4 w-full rounded-lg border border-primary-500 px-4 py-2 text-sm font-semibold text-primary-700 hover:bg-primary-50"
             >
-              {isPaying ? 'Redirigiendo a Stripe…' : 'Pagar 30 € para generar y publicar el proyecto'}
+              Publicar este proyecto en la comunidad
             </button>
           </div>
         )}
+
+        <SubscriptionModal
+          open={isSubscriptionModalOpen}
+          onClose={() => setSubscriptionModalOpen(false)}
+          email={effectiveOwnerEmail}
+        />
       </div>
     </main>
+  );
+}
+
+function SubscriptionModal({
+  open,
+  onClose,
+  email,
+}: {
+  open: boolean;
+  onClose: () => void;
+  email: string;
+}) {
+  const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:4000';
+  const [isRedirecting, setIsRedirecting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  if (!open) return null;
+
+  const handleSubscribe = async () => {
+    try {
+      setIsRedirecting(true);
+      setError(null);
+
+      const res = await fetch(`${API_BASE}/billing/create-subscription-session`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email }),
+      });
+
+      if (!res.ok) throw new Error('No se pudo iniciar la suscripción');
+
+      const data = await res.json();
+      window.location.href = data.url;
+    } catch (err) {
+      console.error('[subscription] Error creating session', err);
+      setError('No se pudo iniciar la suscripción. Inténtalo de nuevo.');
+      setIsRedirecting(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+      <div className="w-full max-w-lg rounded-xl bg-white p-6 shadow-xl">
+        <h2 className="mb-2 text-xl font-semibold text-slate-900">Suscríbete para usar el generador</h2>
+        <p className="mb-4 text-sm text-slate-600">
+          El generador de tareas y presupuesto está disponible mediante una suscripción de <strong>30 €/mes</strong>.
+          La plataforma conecta clientes y programadores y convierte tu idea en un plan detallado de trabajo.
+        </p>
+        {error && <p className="mb-3 text-sm text-red-600">{error}</p>}
+        <div className="flex items-center justify-end gap-3">
+          <button onClick={onClose} className="text-sm text-slate-500 hover:text-slate-700">
+            Cancelar
+          </button>
+          <button onClick={handleSubscribe} disabled={isRedirecting} className="btn-primary">
+            {isRedirecting ? 'Redirigiendo a Stripe…' : 'Suscribirme por 30 €/mes'}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
