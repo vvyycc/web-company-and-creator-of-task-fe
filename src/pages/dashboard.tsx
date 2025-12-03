@@ -1,8 +1,40 @@
 import Link from 'next/link';
+import { useState } from 'react';
 import { signIn, signOut, useSession } from 'next-auth/react';
 
 export default function DashboardPage() {
   const { data: session, status } = useSession();
+  const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:4000';
+  const [subscriptionLoading, setSubscriptionLoading] = useState(false);
+  const [subscriptionError, setSubscriptionError] = useState<string | null>(null);
+  const hasSubscription = false;
+
+  const handleSubscribe = async () => {
+    try {
+      setSubscriptionLoading(true);
+      setSubscriptionError(null);
+
+      const res = await fetch(`${API_BASE}/payments/create-subscription-session`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: session?.user?.email }),
+      });
+
+      if (!res.ok) throw new Error('No se pudo iniciar la suscripción');
+
+      const data = await res.json();
+      if (data?.url) {
+        window.location.href = data.url;
+      } else {
+        throw new Error('Respuesta inesperada al crear la sesión de suscripción');
+      }
+    } catch (err: any) {
+      console.error('[dashboard] Error creating subscription session', err);
+      setSubscriptionError(err.message || 'No se pudo iniciar la suscripción');
+    } finally {
+      setSubscriptionLoading(false);
+    }
+  };
 
   if (status === 'loading') {
     return (
@@ -46,6 +78,22 @@ export default function DashboardPage() {
             Cerrar sesión
           </button>
         </div>
+
+        {!hasSubscription && (
+          <div className="space-y-3 rounded-lg border border-slate-200 bg-white/5 p-4">
+            <p className="text-sm text-slate-700">
+              No tienes una suscripción activa. Puedes suscribirte para tener acceso recurrente al generador de tareas.
+            </p>
+            <button
+              onClick={handleSubscribe}
+              disabled={subscriptionLoading}
+              className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 disabled:opacity-50"
+            >
+              {subscriptionLoading ? 'Creando sesión de suscripción...' : 'Suscribirme'}
+            </button>
+            {subscriptionError && <p className="text-sm text-red-600">{subscriptionError}</p>}
+          </div>
+        )}
 
         <div className="grid gap-4 md:grid-cols-2">
           <Link

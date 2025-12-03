@@ -19,6 +19,7 @@ interface GeneratedTask {
 }
 
 interface ProjectEstimation {
+  id?: string;
   projectTitle: string;
   projectDescription: string;
   ownerEmail: string;
@@ -44,8 +45,14 @@ export default function GeneratorPage() {
   const [isSubscriptionModalOpen, setSubscriptionModalOpen] = useState(false);
   const [hasActiveSubscription, setHasActiveSubscription] = useState<boolean | null>(null);
   const [stripeError, setStripeError] = useState<string | null>(null);
+  const [checkoutLoading, setCheckoutLoading] = useState(false);
+  const [checkoutError, setCheckoutError] = useState<string | null>(null);
 
   const effectiveOwnerEmail = ownerEmail || (session?.user?.email as string) || '';
+  const checkoutStatus = typeof router.query.status === 'string' ? router.query.status : undefined;
+
+  const isPaymentSuccess = checkoutStatus === 'success';
+  const isPaymentCanceled = checkoutStatus === 'cancel';
 
   const formatPrice = (value: number) =>
     new Intl.NumberFormat('es-ES', { style: 'currency', currency: 'EUR' }).format(value);
@@ -160,6 +167,40 @@ export default function GeneratorPage() {
     }
   }, [API_BASE, actuallyGenerateTasks, effectiveOwnerEmail, projectDescription, projectTitle, router.query.status]);
 
+  const handleCreateCheckoutSession = async () => {
+    if (!result?.id) {
+      setCheckoutError('No se encontró el proyecto a pagar. Genera un desglose nuevamente.');
+      return;
+    }
+
+    try {
+      setCheckoutLoading(true);
+      setCheckoutError(null);
+
+      const res = await fetch(`${API_BASE}/payments/create-checkout-session`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projectId: result.id, email: session.user?.email }),
+      });
+
+      if (!res.ok) {
+        throw new Error('No se pudo iniciar el pago del proyecto.');
+      }
+
+      const data = await res.json();
+      if (data?.url) {
+        window.location.href = data.url;
+      } else {
+        throw new Error('Respuesta inesperada del servidor al crear la sesión de pago.');
+      }
+    } catch (err: any) {
+      console.error('[checkout] Error creating checkout session', err);
+      setCheckoutError(err.message || 'No se pudo crear la sesión de pago.');
+    } finally {
+      setCheckoutLoading(false);
+    }
+  };
+
   if (status === 'loading') {
     return (
       <main className="flex min-h-screen items-center justify-center bg-slate-50 p-6">
@@ -190,6 +231,18 @@ export default function GeneratorPage() {
   return (
     <main className="min-h-screen bg-slate-50 p-6">
       <div className="mx-auto max-w-5xl space-y-8 rounded-2xl bg-white p-8 shadow-lg">
+        {isPaymentSuccess && (
+          <div className="rounded-lg border border-green-200 bg-green-50 p-4 text-sm text-green-800">
+            Pago completado. El desglose de tu proyecto ha sido confirmado.
+          </div>
+        )}
+
+        {isPaymentCanceled && (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
+            Pago cancelado. Puedes intentarlo de nuevo cuando quieras.
+          </div>
+        )}
+
         <div className="flex flex-col gap-2">
           <p className="text-sm font-semibold uppercase tracking-wide text-blue-600">Herramienta</p>
           <h1 className="text-3xl font-bold text-slate-900">Generador de tareas y presupuesto</h1>
@@ -346,6 +399,17 @@ export default function GeneratorPage() {
                 Coste total estimado para el cliente:{' '}
                 <strong>{formatPrice(result.grandTotalClientCost)}</strong>
               </div>
+            </div>
+
+            <div className="space-y-3">
+              <button
+                onClick={handleCreateCheckoutSession}
+                disabled={checkoutLoading}
+                className="w-full rounded-lg bg-blue-600 px-4 py-2 text-white hover:bg-blue-700 disabled:opacity-50"
+              >
+                {checkoutLoading ? 'Creando sesión de pago...' : 'Confirmar este desglose y pagar 30 €'}
+              </button>
+              {checkoutError && <p className="text-sm text-red-600">{checkoutError}</p>}
             </div>
 
             <button
