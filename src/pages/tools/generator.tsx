@@ -42,8 +42,6 @@ export default function GeneratorPage() {
   const [result, setResult] = useState<ProjectEstimation | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [isPublishing, setIsPublishing] = useState(false);
-  const [publishError, setPublishError] = useState<string | null>(null);
 
   const [checkingSubscription, setCheckingSubscription] = useState(false);
   const [hasActiveSubscription, setHasActiveSubscription] = useState<boolean | null>(null);
@@ -56,58 +54,6 @@ export default function GeneratorPage() {
   const formatPrice = (value: number) =>
     new Intl.NumberFormat('es-ES', { style: 'currency', currency: 'EUR' }).format(value);
 
-  // --- Normalización de la respuesta del backend ---
-  const normalizeProjectEstimation = useCallback(
-    (raw: any): ProjectEstimation => {
-      const num = (v: any, fallback = 0) =>
-        typeof v === 'number' && !Number.isNaN(v) ? v : fallback;
-
-      const tasks: GeneratedTask[] = Array.isArray(raw.tasks) ? raw.tasks : [];
-
-      const totalHours = num(
-        raw.totalHours,
-        tasks.reduce((acc, t) => acc + num(t.estimatedHours, 0), 0)
-      );
-
-      const totalTasksPrice = num(
-        raw.totalTasksPrice,
-        tasks.reduce((acc, t) => acc + num(t.taskPrice, 0), 0)
-      );
-
-      const platformFeePercent = num(raw.platformFeePercent, 1);
-      const generatorServiceFee = num(raw.generatorServiceFee, 0);
-
-      const platformFeeAmount = num(
-        raw.platformFeeAmount,
-        (totalTasksPrice * platformFeePercent) / 100
-      );
-
-      const grandTotalClientCost = num(
-        raw.grandTotalClientCost,
-        totalTasksPrice + platformFeeAmount + generatorServiceFee
-      );
-
-      return {
-        id: raw.id ?? raw.projectId,
-        projectTitle: raw.projectTitle ?? projectTitle,
-        projectDescription: raw.projectDescription ?? projectDescription,
-        ownerEmail: raw.ownerEmail ?? effectiveOwnerEmail,
-        tasks,
-        totalHours,
-        totalTasksPrice,
-        platformFeePercent,
-        platformFeeAmount,
-        generatorServiceFee,
-        grandTotalClientCost,
-      };
-    },
-    [effectiveOwnerEmail, projectDescription, projectTitle]
-  );
-
-  // --- Restaurar proyecto pendiente desde localStorage ---
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    if (!effectiveOwnerEmail) return;
   // -------- 1) Comprobación de suscripción --------
   const checkSubscription = useCallback(async (email: string) => {
     if (!email) return;
@@ -223,45 +169,7 @@ export default function GeneratorPage() {
     } finally {
       setIsLoading(false);
     }
-  }, [
-    API_BASE,
-    effectiveOwnerEmail,
-    normalizeProjectEstimation,
-    projectDescription,
-    projectTitle,
-  ]);
-
-  // --- Publicar proyecto en la comunidad ---
-  const handlePublishToCommunity = useCallback(async () => {
-    if (!result?.id) {
-      setPublishError('No se encontró el proyecto a publicar. Genera un desglose nuevamente.');
-      return;
-    }
-
-    try {
-      setIsPublishing(true);
-      setPublishError(null);
-
-      const res = await fetch(`${API_BASE}/community/projects/${result.id}/publish`, {
-        method: 'POST',
-      });
-
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(
-          data.error || 'No se pudo publicar el proyecto en la comunidad. Inténtalo de nuevo.'
-        );
-      }
-
-      await res.json();
-      router.push(`/community/projects/${result.id}`);
-    } catch (err: any) {
-      console.error('[generator] Error publicando en la comunidad', err);
-      setPublishError(err.message || 'No se pudo publicar el proyecto en la comunidad.');
-    } finally {
-      setIsPublishing(false);
-    }
-  }, [API_BASE, result?.id, router]);
+  }, [projectTitle, projectDescription, effectiveOwnerEmail]);
 
   // -------- 3) Handler principal de generación --------
   const handleGenerate = useCallback(async () => {
@@ -605,27 +513,15 @@ export default function GeneratorPage() {
               </div>
             </div>
 
-            <div className="space-y-3">
-              <button
-                onClick={handleCreateCheckoutSession}
-                disabled={checkoutLoading}
-                className="w-full rounded-lg bg-blue-600 px-4 py-2 text-white hover:bg-blue-700 disabled:opacity-50"
-              >
-                {checkoutLoading ? 'Creando sesión de pago...' : 'Confirmar este desglose y pagar 30 €'}
-              </button>
-              {checkoutError && <p className="text-sm text-red-600">{checkoutError}</p>}
-            </div>
-
-            <div className="space-y-2">
-              <button
-                onClick={handlePublishToCommunity}
-                disabled={isPublishing}
-                className="mt-4 w-full rounded-lg border border-primary-500 px-4 py-2 text-sm font-semibold text-primary-700 hover:bg-primary-50 disabled:opacity-50"
-              >
-                {isPublishing ? 'Publicando...' : 'Publicar este proyecto en la comunidad'}
-              </button>
-              {publishError && <p className="text-sm text-red-600">{publishError}</p>}
-            </div>
+            <button
+              onClick={handlePublishToCommunity}
+              disabled={publishLoading}
+              className="mt-4 w-full rounded-lg border border-blue-500 px-4 py-2 text-sm font-semibold text-blue-700 hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {publishLoading
+                ? 'Publicando proyecto en la comunidad…'
+                : 'Publicar este proyecto en la comunidad'}
+            </button>
           </div>
         )}
 
