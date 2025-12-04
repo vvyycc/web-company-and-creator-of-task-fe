@@ -43,6 +43,8 @@ export default function GeneratorPage() {
   const [result, setResult] = useState<ProjectEstimation | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [isPublishing, setIsPublishing] = useState(false);
+  const [publishError, setPublishError] = useState<string | null>(null);
 
   const [checkingSubscription, setCheckingSubscription] = useState(false);
   const [showSubscriptionModal, setShowSubscriptionModal] = useState(false);
@@ -93,6 +95,7 @@ export default function GeneratorPage() {
       );
 
       return {
+        id: raw.id ?? raw.projectId,
         projectTitle: raw.projectTitle ?? projectTitle,
         projectDescription: raw.projectDescription ?? projectDescription,
         ownerEmail: raw.ownerEmail ?? effectiveOwnerEmail,
@@ -262,52 +265,37 @@ export default function GeneratorPage() {
     projectTitle,
   ]);
 
-  // --- Pagar y publicar proyecto en la comunidad ---
-  const handlePayAndPublish = useCallback(async () => {
-    if (!result) return;
-    if (!effectiveOwnerEmail) {
-      setError('Falta el email del propietario para procesar el pago.');
+  // --- Publicar proyecto en la comunidad ---
+  const handlePublishToCommunity = useCallback(async () => {
+    if (!result?.id) {
+      setPublishError('No se encontró el proyecto a publicar. Genera un desglose nuevamente.');
       return;
     }
 
     try {
-      if (typeof window !== 'undefined') {
-        window.localStorage.setItem(
-          'lastGeneratedProject',
-          JSON.stringify({
-            ownerEmail: effectiveOwnerEmail,
-            estimation: result,
-          })
-        );
-      }
+      setIsPublishing(true);
+      setPublishError(null);
 
-      const res = await fetch(`${API_BASE}/billing/create-project-payment-session`, {
+      const res = await fetch(`${API_BASE}/community/projects/${result.id}/publish`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          email: effectiveOwnerEmail,
-          amount: result.grandTotalClientCost,
-          projectTitle: result.projectTitle,
-        }),
       });
 
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        console.error(
-          '[generator] Error creando sesión de pago de proyecto',
-          res.status,
-          data
+        throw new Error(
+          data.error || 'No se pudo publicar el proyecto en la comunidad. Inténtalo de nuevo.'
         );
-        throw new Error(data.error || 'No se pudo iniciar el pago del proyecto');
       }
 
-      const data = await res.json();
-      window.location.href = data.url;
+      await res.json();
+      router.push(`/community/projects/${result.id}`);
     } catch (err: any) {
-      console.error('[generator] Error en handlePayAndPublish', err);
-      setError(err.message || 'No se pudo iniciar el pago del proyecto.');
+      console.error('[generator] Error publicando en la comunidad', err);
+      setPublishError(err.message || 'No se pudo publicar el proyecto en la comunidad.');
+    } finally {
+      setIsPublishing(false);
     }
-  }, [API_BASE, effectiveOwnerEmail, result]);
+  }, [API_BASE, result?.id, router]);
 
   // --- Handler principal de generación (gateado por suscripción) ---
   const handleGenerate = useCallback(async () => {
@@ -679,12 +667,16 @@ export default function GeneratorPage() {
               {checkoutError && <p className="text-sm text-red-600">{checkoutError}</p>}
             </div>
 
-            <button
-              onClick={handlePayAndPublish}
-              className="mt-4 w-full rounded-lg border border-primary-500 px-4 py-2 text-sm font-semibold text-primary-700 hover:bg-primary-50"
-            >
-              Pagar y publicar este proyecto en la comunidad
-            </button>
+            <div className="space-y-2">
+              <button
+                onClick={handlePublishToCommunity}
+                disabled={isPublishing}
+                className="mt-4 w-full rounded-lg border border-primary-500 px-4 py-2 text-sm font-semibold text-primary-700 hover:bg-primary-50 disabled:opacity-50"
+              >
+                {isPublishing ? 'Publicando...' : 'Publicar este proyecto en la comunidad'}
+              </button>
+              {publishError && <p className="text-sm text-red-600">{publishError}</p>}
+            </div>
           </div>
         )}
 
