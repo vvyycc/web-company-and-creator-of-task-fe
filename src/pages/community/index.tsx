@@ -1,168 +1,185 @@
+// src/pages/community/index.tsx
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { useEffect, useMemo, useState } from 'react';
 
-type CommunityTask = {
-  id?: string;
-  title: string;
-  description?: string;
-  estimatedHours?: number;
-  taskPrice?: number;
-};
+const API_BASE =
+  process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:4000';
 
-type CommunityProject = {
+interface CommunityListItem {
   id: string;
-  projectTitle: string;
-  projectDescription?: string;
-  tasks?: CommunityTask[];
-  estimation?: {
-    tasks?: CommunityTask[];
-    totalTasksPrice?: number;
-    platformFeePercent?: number;
-  };
-  totalTasksPrice?: number;
-  platformFeePercent?: number;
-  createdAt?: string;
+  title: string;
+  description: string;
+  ownerEmail: string;
+  totalTasksPrice: number;
+  platformFeePercent: number;
+  tasksCount: number;
   publishedAt?: string;
+}
+
+const formatPrice = (value: number) =>
+  new Intl.NumberFormat('es-ES', {
+    style: 'currency',
+    currency: 'EUR',
+  }).format(value);
+
+const formatDate = (value?: string) => {
+  if (!value) return '';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('es-ES', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+  });
 };
 
-export default function CommunityProjectsPage() {
-  const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:4000';
-  const [projects, setProjects] = useState<CommunityProject[]>([]);
+export default function CommunityIndexPage() {
+  const [projects, setProjects] = useState<CommunityListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const fetchProjects = async () => {
+    const loadProjects = async () => {
       try {
         setLoading(true);
         setError(null);
 
         const res = await fetch(`${API_BASE}/community/projects`);
+
         if (!res.ok) {
-          throw new Error('No se pudo cargar el listado de proyectos de la comunidad.');
+          const data = await res.json().catch(() => ({}));
+          throw new Error(
+            data.error || 'No se pudieron cargar los proyectos de comunidad'
+          );
         }
 
-        const data = await res.json();
-        const list: CommunityProject[] = Array.isArray(data)
-          ? data
-          : Array.isArray(data?.projects)
-          ? data.projects
-          : [];
-
-        setProjects(list);
+        const data = (await res.json()) as CommunityListItem[];
+        setProjects(data);
       } catch (err: any) {
-        console.error('[community] Error fetching projects', err);
-        setError(err.message || 'Error al cargar los proyectos de la comunidad.');
+        console.error('[community-index] Error cargando proyectos', err);
+        setError(
+          err.message || 'No se pudieron cargar los proyectos de comunidad'
+        );
       } finally {
         setLoading(false);
       }
     };
 
-    fetchProjects();
-  }, [API_BASE]);
+    loadProjects();
+  }, []);
 
-  const formatPrice = (value: number) =>
-    new Intl.NumberFormat('es-ES', { style: 'currency', currency: 'EUR' }).format(value);
+  if (loading) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-slate-50 p-6">
+        <p className="text-lg font-semibold text-slate-700">
+          Cargando proyectos de la comunidad…
+        </p>
+      </main>
+    );
+  }
 
-  const formatDate = (value?: string) => {
-    if (!value) return 'Fecha no disponible';
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) return value;
-    return date.toLocaleDateString('es-ES', {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric',
-    });
-  };
-
-  const getTasks = (project: CommunityProject) => project.tasks ?? project.estimation?.tasks ?? [];
-
-  const projectsWithTotals = useMemo(
-    () =>
-      projects.map((project) => {
-        const tasks = getTasks(project);
-        const totalTasksPrice =
-          project.totalTasksPrice ??
-          project.estimation?.totalTasksPrice ??
-          tasks.reduce((sum, task) => sum + (task.taskPrice ?? 0), 0);
-        const platformFeePercent = project.platformFeePercent ?? project.estimation?.platformFeePercent ?? 1;
-        const platformFeeAmount = (totalTasksPrice * platformFeePercent) / 100;
-
-        return {
-          ...project,
-          tasks,
-          totalTasksPrice,
-          platformFeePercent,
-          platformFeeAmount,
-        };
-      }),
-    [projects]
-  );
-
-  const truncate = (value = '', maxLength = 120) =>
-    value.length > maxLength ? `${value.slice(0, maxLength)}…` : value;
+  if (error) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-slate-50 p-6">
+        <div className="w-full max-w-md rounded-2xl bg-white p-8 text-center shadow-lg">
+          <h1 className="mb-2 text-xl font-bold text-slate-900">
+            No se pudieron cargar los proyectos
+          </h1>
+          <p className="mb-4 text-slate-600">{error}</p>
+          <Link
+            href="/tools/dashboard"
+            className="inline-flex justify-center rounded-lg bg-slate-700 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800"
+          >
+            Volver al dashboard
+          </Link>
+        </div>
+      </main>
+    );
+  }
 
   return (
     <main className="min-h-screen bg-slate-50 p-6">
-      <div className="mx-auto max-w-5xl space-y-6 rounded-2xl bg-white p-8 shadow-lg">
-        <header className="space-y-2">
-          <p className="text-sm font-semibold uppercase tracking-wide text-blue-600">Comunidad</p>
-          <h1 className="text-3xl font-bold text-slate-900">Proyectos de la comunidad</h1>
-          <p className="text-slate-600">
-            Explora los proyectos publicados por la comunidad y descubre el desglose de tareas
-            y presupuestos estimados.
-          </p>
-        </header>
+      <div className="mx-auto max-w-6xl space-y-6">
+        <div className="flex flex-col gap-3 rounded-2xl bg-white p-6 shadow-sm md:flex-row md:items-center md:justify-between">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-wide text-blue-600">
+              Comunidad
+            </p>
+            <h1 className="mt-1 text-3xl font-bold text-slate-900">
+              Proyectos publicados
+            </h1>
+            <p className="mt-2 text-sm text-slate-600">
+              Explora proyectos de otros usuarios y elige tareas en las que
+              colaborar.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Link
+              href="/tools/dashboard"
+              className="inline-flex items-center justify-center rounded-lg border border-slate-300 px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+            >
+              Volver al dashboard
+            </Link>
+            <Link
+              href="/tools/generator"
+              className="inline-flex items-center justify-center rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-700"
+            >
+              Crear nuevo proyecto
+            </Link>
+          </div>
+        </div>
 
-        {loading && <p className="text-sm text-slate-600">Cargando proyectos…</p>}
-        {error && <p className="text-sm text-red-600">{error}</p>}
-
-        {!loading && !error && projectsWithTotals.length === 0 && (
-          <p className="text-slate-700">
-            Todavía no hay proyectos publicados en la comunidad.
-          </p>
-        )}
-
-        {!loading && !error && projectsWithTotals.length > 0 && (
-          <div className="grid gap-4">
-            {projectsWithTotals.map((project) => (
-              <div
+        {projects.length === 0 ? (
+          <div className="rounded-2xl bg-white p-8 text-center shadow-sm">
+            <p className="text-sm text-slate-600">
+              Todavía no hay proyectos publicados en la comunidad.
+            </p>
+            <p className="mt-2 text-sm text-slate-600">
+              Genera un proyecto desde el generador de tareas y publícalo para
+              que otros desarrolladores puedan colaborar.
+            </p>
+          </div>
+        ) : (
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+            {projects.map((project) => (
+              <Link
                 key={project.id}
-                className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm transition hover:-translate-y-0.5 hover:shadow-md"
+                href={`/community/${project.id}`}
+                className="flex flex-col rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-200 hover:-translate-y-1 hover:shadow-md hover:ring-blue-400 transition"
               >
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                  <div className="space-y-1">
-                    <h2 className="text-xl font-bold text-slate-900">{project.projectTitle}</h2>
-                    <p className="text-sm text-slate-600">
-                      {truncate(project.projectDescription, 120)}
-                    </p>
-                  </div>
-                  <Link
-                    href={`/community/projects/${project.id}`}
-                    className="inline-flex items-center justify-center rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700"
-                  >
-                    Ver proyecto
-                  </Link>
+                <h2 className="mb-1 line-clamp-2 text-sm font-semibold text-slate-900">
+                  {project.title}
+                </h2>
+                <p className="mb-3 line-clamp-3 text-xs text-slate-600">
+                  {project.description}
+                </p>
+                <p className="mb-2 text-[11px] text-slate-500">
+                  Publicado por{' '}
+                  <span className="font-medium">
+                    {project.ownerEmail}
+                  </span>
+                  {project.publishedAt && (
+                    <>
+                      {' · '}
+                      {formatDate(project.publishedAt)}
+                    </>
+                  )}
+                </p>
+                <div className="mt-auto flex items-center justify-between text-xs text-slate-600">
+                  <span>
+                    Tareas:{' '}
+                    <span className="font-semibold">
+                      {project.tasksCount}
+                    </span>
+                  </span>
+                  <span>
+                    Presupuesto:{' '}
+                    <span className="font-semibold">
+                      {formatPrice(project.totalTasksPrice || 0)}
+                    </span>
+                  </span>
                 </div>
-
-                <div className="mt-4 grid gap-2 text-sm text-slate-700 sm:grid-cols-2 md:grid-cols-3">
-                  <div>
-                    <span className="font-semibold text-slate-900">Tareas:</span> {project.tasks?.length ?? 0}
-                  </div>
-                  <div>
-                    <span className="font-semibold text-slate-900">Presupuesto tareas:</span>{' '}
-                    {formatPrice(project.totalTasksPrice)}
-                  </div>
-                  <div>
-                    <span className="font-semibold text-slate-900">Comisión plataforma (1%):</span>{' '}
-                    {formatPrice(project.platformFeeAmount)}
-                  </div>
-                  <div>
-                    <span className="font-semibold text-slate-900">Fecha de publicación:</span>{' '}
-                    {formatDate(project.publishedAt ?? project.createdAt)}
-                  </div>
-                </div>
-              </div>
+              </Link>
             ))}
           </div>
         )}
