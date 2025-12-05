@@ -18,6 +18,8 @@ interface GeneratedTask {
 }
 
 interface ProjectEstimation {
+  id?: string;
+  _id?: string;
   projectTitle: string;
   projectDescription: string;
   ownerEmail: string;
@@ -155,6 +157,7 @@ export default function GeneratorPage() {
 
       const safeProject: ProjectEstimation = {
         ...backendProject,
+        id: backendProject.id || (backendProject as { _id?: string })._id,
         tasks: Array.isArray(backendProject.tasks) ? backendProject.tasks : [],
       };
 
@@ -214,34 +217,35 @@ export default function GeneratorPage() {
 
   // -------- 4) Publicar en comunidad --------
   const handlePublishToCommunity = async () => {
-  if (!result) return;
+    if (!result) return;
 
-  try {
-    const res = await fetch(`${API_BASE}/community/projects`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        ownerEmail: effectiveOwnerEmail,
-        projectTitle: result.projectTitle,
-        projectDescription: result.projectDescription,
-        estimation: result,
-      }),
-    });
-
-    if (!res.ok) {
-      console.error('[generator] Error HTTP publicando proyecto', res.status);
-      throw new Error('No se pudo publicar el proyecto');
+    const projectId = result.id || result._id;
+    if (!projectId) {
+      setError('No se pudo identificar el proyecto a publicar.');
+      return;
     }
 
-    const data: { id: string; publicUrl?: string } = await res.json();
-    const target = data.publicUrl ?? `/community/${data.id}`;
-    // Redirigimos al tablero de comunidad
-    router.push(target);
-  } catch (err) {
-    console.error('[generator] Error publishing project', err);
-    setError('No se pudo publicar el proyecto en la comunidad');
-  }
-};
+    try {
+      setPublishLoading(true);
+      setError(null);
+
+      const res = await fetch(`${API_BASE}/community/projects/${projectId}/publish`, {
+        method: 'POST',
+      });
+
+      if (!res.ok) {
+        console.error('[generator] Error HTTP publicando proyecto', res.status);
+        throw new Error('No se pudo publicar el proyecto en la comunidad');
+      }
+
+      router.push(`/community/projects/${projectId}`);
+    } catch (err) {
+      console.error('[generator] Error publishing project', err);
+      setError('No se pudo publicar el proyecto en la comunidad');
+    } finally {
+      setPublishLoading(false);
+    }
+  };
 
   // -------- 5) Modal de suscripción --------
   const [showSubscriptionModal, setShowSubscriptionModal] = useState(false);
