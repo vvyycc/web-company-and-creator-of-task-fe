@@ -1,45 +1,37 @@
 import Link from 'next/link';
-import { useEffect, useMemo, useState } from 'react';
-
-type CommunityTask = {
-  id?: string;
-  title: string;
-  description?: string;
-  estimatedHours?: number;
-  taskPrice?: number;
-};
+import { useEffect, useState } from 'react';
 
 type CommunityProject = {
   id: string;
-  projectTitle: string;
-  projectDescription?: string;
-  tasks?: CommunityTask[];
-  estimation?: {
-    tasks?: CommunityTask[];
-    totalTasksPrice?: number;
-    platformFeePercent?: number;
-  };
-  totalTasksPrice?: number;
-  platformFeePercent?: number;
-  createdAt?: string;
-  publishedAt?: string;
+  title: string;
+  description?: string;
+  totalTasksPrice: number;
+  platformFeePercent: number;
+  publishedAt: string;
+  tasksCount: number;
 };
 
+const API_URL = 'http://localhost:4000/community/projects';
+
 export default function CommunityProjectsPage() {
-  const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:4000';
   const [projects, setProjects] = useState<CommunityProject[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState(false);
 
   useEffect(() => {
     const fetchProjects = async () => {
       try {
         setLoading(true);
-        setError(null);
+        setError(false);
 
-        const res = await fetch(`${API_BASE}/community/projects`);
+        const res = await fetch(API_URL);
+
         if (!res.ok) {
-          throw new Error('No se pudo cargar el listado de proyectos de la comunidad.');
+          if (res.status >= 500) {
+            throw new Error('Server error');
+          }
+          setProjects([]);
+          return;
         }
 
         const data = await res.json();
@@ -50,117 +42,63 @@ export default function CommunityProjectsPage() {
           : [];
 
         setProjects(list);
-      } catch (err: any) {
+      } catch (err) {
         console.error('[community] Error fetching projects', err);
-        setError(err.message || 'Error al cargar los proyectos de la comunidad.');
+        setError(true);
       } finally {
         setLoading(false);
       }
     };
 
     fetchProjects();
-  }, [API_BASE]);
+  }, []);
 
+  const formatDate = (value: string) => new Date(value).toLocaleDateString();
   const formatPrice = (value: number) =>
     new Intl.NumberFormat('es-ES', { style: 'currency', currency: 'EUR' }).format(value);
-
-  const formatDate = (value?: string) => {
-    if (!value) return 'Fecha no disponible';
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) return value;
-    return date.toLocaleDateString('es-ES', {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric',
-    });
-  };
-
-  const getTasks = (project: CommunityProject) => project.tasks ?? project.estimation?.tasks ?? [];
-
-  const projectsWithTotals = useMemo(
-    () =>
-      projects.map((project) => {
-        const tasks = getTasks(project);
-        const totalTasksPrice =
-          project.totalTasksPrice ??
-          project.estimation?.totalTasksPrice ??
-          tasks.reduce((sum, task) => sum + (task.taskPrice ?? 0), 0);
-        const platformFeePercent = project.platformFeePercent ?? project.estimation?.platformFeePercent ?? 1;
-        const platformFeeAmount = (totalTasksPrice * platformFeePercent) / 100;
-
-        return {
-          ...project,
-          tasks,
-          totalTasksPrice,
-          platformFeePercent,
-          platformFeeAmount,
-        };
-      }),
-    [projects]
-  );
-
-  const truncate = (value = '', maxLength = 120) =>
-    value.length > maxLength ? `${value.slice(0, maxLength)}…` : value;
+  const truncate = (value = '') => (value.length > 120 ? `${value.slice(0, 120)}…` : value);
 
   return (
-    <main className="min-h-screen bg-slate-50 p-6">
-      <div className="mx-auto max-w-5xl space-y-6 rounded-2xl bg-white p-8 shadow-lg">
-        <header className="space-y-2">
-          <p className="text-sm font-semibold uppercase tracking-wide text-blue-600">Comunidad</p>
+    <main className="min-h-screen bg-slate-50">
+      <div className="max-w-5xl mx-auto px-4 py-8">
+        <header className="mb-6">
           <h1 className="text-3xl font-bold text-slate-900">Proyectos de la comunidad</h1>
-          <p className="text-slate-600">
-            Explora los proyectos publicados por la comunidad y descubre el desglose de tareas
-            y presupuestos estimados.
-          </p>
         </header>
 
-        {loading && <p className="text-sm text-slate-600">Cargando proyectos…</p>}
-        {error && <p className="text-sm text-red-600">{error}</p>}
+        {loading && <p className="text-slate-700">Cargando proyectos de la comunidad…</p>}
 
-        {!loading && !error && projectsWithTotals.length === 0 && (
-          <p className="text-slate-700">
-            Todavía no hay proyectos publicados en la comunidad.
+        {error && (
+          <p className="text-red-600">
+            No se pudieron cargar los proyectos. Inténtalo de nuevo más tarde.
           </p>
         )}
 
-        {!loading && !error && projectsWithTotals.length > 0 && (
-          <div className="grid gap-4">
-            {projectsWithTotals.map((project) => (
-              <div
-                key={project.id}
-                className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm transition hover:-translate-y-0.5 hover:shadow-md"
-              >
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                  <div className="space-y-1">
-                    <h2 className="text-xl font-bold text-slate-900">{project.projectTitle}</h2>
-                    <p className="text-sm text-slate-600">
-                      {truncate(project.projectDescription, 120)}
-                    </p>
+        {!loading && !error && projects.length === 0 && (
+          <p className="text-slate-700">Todavía no hay proyectos publicados en la comunidad.</p>
+        )}
+
+        {!loading && !error && projects.length > 0 && (
+          <div>
+            {projects.map((project) => (
+              <div key={project.id} className="bg-white rounded-xl shadow p-6 mb-4">
+                <div className="flex flex-col gap-2 sm:flex-row sm:justify-between sm:items-start">
+                  <div>
+                    <h2 className="text-xl font-semibold text-slate-900">{project.title}</h2>
+                    <p className="text-sm text-slate-700">{truncate(project.description)}</p>
                   </div>
                   <Link
                     href={`/community/projects/${project.id}`}
-                    className="inline-flex items-center justify-center rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700"
+                    className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 text-sm font-semibold"
                   >
                     Ver proyecto
                   </Link>
                 </div>
 
-                <div className="mt-4 grid gap-2 text-sm text-slate-700 sm:grid-cols-2 md:grid-cols-3">
-                  <div>
-                    <span className="font-semibold text-slate-900">Tareas:</span> {project.tasks?.length ?? 0}
-                  </div>
-                  <div>
-                    <span className="font-semibold text-slate-900">Presupuesto tareas:</span>{' '}
-                    {formatPrice(project.totalTasksPrice)}
-                  </div>
-                  <div>
-                    <span className="font-semibold text-slate-900">Comisión plataforma (1%):</span>{' '}
-                    {formatPrice(project.platformFeeAmount)}
-                  </div>
-                  <div>
-                    <span className="font-semibold text-slate-900">Fecha de publicación:</span>{' '}
-                    {formatDate(project.publishedAt ?? project.createdAt)}
-                  </div>
+                <div className="mt-4 grid gap-2 text-sm text-slate-800 sm:grid-cols-2 md:grid-cols-3">
+                  <div>Nº de tareas: {project.tasksCount}</div>
+                  <div>Presupuesto total: {formatPrice(project.totalTasksPrice)}</div>
+                  <div>Comisión {project.platformFeePercent}%</div>
+                  <div>Publicado el {formatDate(project.publishedAt)}</div>
                 </div>
               </div>
             ))}
