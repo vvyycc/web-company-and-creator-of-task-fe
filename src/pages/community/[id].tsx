@@ -5,7 +5,13 @@ import { useSession } from 'next-auth/react';
 import Link from 'next/link';
 
 type ColumnId = 'todo' | 'doing' | 'done';
-type TaskCategory = 'ARCHITECTURE' | 'MODEL' | 'SERVICE' | 'VIEW' | 'INFRA' | 'QA';
+type TaskCategory =
+  | 'ARCHITECTURE'
+  | 'MODEL'
+  | 'SERVICE'
+  | 'VIEW'
+  | 'INFRA'
+  | 'QA';
 
 interface BoardColumn {
   id: ColumnId;
@@ -21,6 +27,8 @@ interface BoardTask {
   priority: number;
   layer: TaskCategory;
   columnId: ColumnId;
+  assigneeEmail?: string | null;
+  assigneeAvatar?: string | null;
 }
 
 interface BoardProject {
@@ -56,7 +64,12 @@ export default function CommunityProjectBoard() {
   const [tasks, setTasks] = useState<BoardTask[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
   const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null);
+  const [mutatingTaskId, setMutatingTaskId] = useState<string | null>(null);
+
+  const currentEmail = session?.user?.email ?? null;
+  const currentAvatar = (session?.user as any)?.image ?? null;
 
   const isOwner = useMemo(
     () =>
@@ -75,15 +88,18 @@ export default function CommunityProjectBoard() {
   useEffect(() => {
     if (!router.isReady || typeof id !== 'string') return;
 
+    const isValidObjectId = /^[0-9a-fA-F]{24}$/.test(id);
+    if (!isValidObjectId) {
+      router.replace('/community');
+      return;
+    }
+
     const loadBoard = async () => {
       try {
         setLoading(true);
         setError(null);
 
-        const res = await fetch(
-          `${API_BASE}/community/projects/${id}/board`
-        );
-
+        const res = await fetch(`${API_BASE}/community/projects/${id}/board`);
         if (!res.ok) {
           const data = await res.json().catch(() => ({}));
           throw new Error(
@@ -92,25 +108,27 @@ export default function CommunityProjectBoard() {
         }
 
         const data = (await res.json()) as BoardResponse;
+
+        // ⚠️ si el backend devolviera ids duplicados, el drag & drop se rompe.
+        // Con el backend corregido ya no debería pasar.
         setProject(data.project);
         setColumns(data.columns);
         setTasks(data.tasks);
       } catch (err: any) {
         console.error('[community-board] Error cargando tablero', err);
-        setError(
-          err.message || 'No se pudo cargar el proyecto de la comunidad'
-        );
+        setError(err.message || 'No se pudo cargar el proyecto de la comunidad');
       } finally {
         setLoading(false);
       }
     };
 
     loadBoard();
-  }, [router.isReady, id]);
+  }, [router.isReady, id, router]);
 
-  // --------- Drag & Drop (solo en frontend por ahora) ---------
-  const handleDragStart = (taskId: string) => {
+  // --------- Drag & drop ---------
+  const handleDragStart = (taskId: string, columnId: ColumnId) => {
     if (!canInteract) return;
+    if (columnId === 'done') return; // done congelado (no se arrastra)
     setDraggedTaskId(taskId);
   };
 
@@ -118,32 +136,93 @@ export default function CommunityProjectBoard() {
     setDraggedTaskId(null);
   };
 
-  const handleDropOnColumn = (columnId: ColumnId) => {
-    if (!canInteract || !draggedTaskId) return;
+  const handleDropOnColumn = async (targetColumn: ColumnId) => {
+    if (!canInteract || !draggedTaskId || !project) return;
 
-    setTasks((prev) =>
-      prev.map((task) =>
-        task.id === draggedTaskId ? { ...task, columnId } : task
-      )
-    );
-    setDraggedTaskId(null);
+    const task = tasks.find((t) => t.id === draggedTaskId);
+    if (!task) {
+      setDraggedTaskId(null);
+      return;
+    }
 
-    // Aquí en el futuro podríamos persistir:
-    // await fetch(`${API_BASE}/community/tasks/${draggedTaskId}/move`, { ... })
-  };
+    const sourceColumn = task.columnId;
+    if (sourceColumn === targetColumn) {
+      setDraggedTaskId(null);
+      return;
+    }
 
-  const handleSelectTask = (taskId: string) => {
-    if (!canInteract) return;
+    try {
+      // todo -> doing  => assign (asigna avatar)
+      if (sourceColumn === 'todo' && targetColumn === 'doing') {
+        setMutatingTaskId(task.id);
 
-    // Por ahora, seleccionar tarea == moverla a "Haciendo"
-    setTasks((prev) =>
-      prev.map((task) =>
-        task.id === taskId ? { ...task, columnId: 'doing' } : task
-      )
-    );
+        const res = await fetch(
+          `${API_BASE}/community/projects/${project.id}/tasks/${task.id}/assign`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              userEmail: currentEmail,
+              userAvatar: currentAvatar,
+            }),
+          }
+        );
 
-    // Aquí podrías llamar a un endpoint para registrar que este usuario
-    // ha tomado la tarea (y que no es el owner).
+        const data = await res.json().catch(() => ({} as any));
+        if (!res.ok) throw new Error(data.error || 'No se pudo asignar la tarea');
+
+        setTasks(data.tasks as BoardTask[]);
+      }
+
+      // doing -> done => complete (mantiene avatar)
+      else if (sourceColumn === 'doing' && targetColumn === 'done') {
+        setMutatingTaskId(task.id);
+
+        const res = await fetch(
+          `${API_BASE}/community/projects/${project.id}/tasks/${task.id}/complete`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ userEmail: currentEmail }),
+          }
+        );
+
+        const data = await res.json().catch(() => ({} as any));
+        if (!res.ok)
+          throw new Error(data.error || 'No se pudo marcar la tarea como hecha');
+
+        setTasks(data.tasks as BoardTask[]);
+      }
+
+      // doing -> todo => unassign (borra avatar)
+      else if (sourceColumn === 'doing' && targetColumn === 'todo') {
+        setMutatingTaskId(task.id);
+
+        const res = await fetch(
+          `${API_BASE}/community/projects/${project.id}/tasks/${task.id}/unassign`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ userEmail: currentEmail }),
+          }
+        );
+
+        const data = await res.json().catch(() => ({} as any));
+        if (!res.ok)
+          throw new Error(data.error || 'No se pudo desasignar la tarea');
+
+        setTasks(data.tasks as BoardTask[]);
+      }
+
+      // Bloqueamos:
+      // - todo -> done (no permitido)
+      // - done -> cualquier cosa (done congelado)
+    } catch (err) {
+      console.error('[community-board] Error moviendo tarea', err);
+    } finally {
+      setMutatingTaskId(null);
+      setDraggedTaskId(null);
+    }
   };
 
   const tasksByColumn = useMemo(() => {
@@ -220,7 +299,7 @@ export default function CommunityProjectBoard() {
 
             <div className="flex flex-wrap gap-2">
               <Link
-                href="/tools/dashboard"
+                href="/dashboard"
                 className="inline-flex items-center justify-center rounded-lg border border-slate-300 px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
               >
                 Volver al dashboard
@@ -236,10 +315,8 @@ export default function CommunityProjectBoard() {
 
           <p className="mt-1 text-sm text-slate-700">{project.description}</p>
           <p className="mt-3 text-xs text-slate-500">
-            Publicado por{' '}
-            <span className="font-medium">{project.ownerEmail}</span>. Los
-            desarrolladores pueden elegir tareas de este tablero para
-            colaboraciones.
+            Publicado por <span className="font-medium">{project.ownerEmail}</span>.
+            Los desarrolladores pueden arrastrar tareas entre columnas para colaborar.
           </p>
 
           {!session?.user?.email && (
@@ -250,9 +327,7 @@ export default function CommunityProjectBoard() {
 
           {isOwner && (
             <p className="mt-3 text-xs text-slate-500">
-              Estás viendo tu propio proyecto. Este tablero es de solo lectura
-              para el creador; los desarrolladores serán otros usuarios que no
-              sean {project.ownerEmail}.
+              Estás viendo tu propio proyecto. Este tablero es de solo lectura para el creador.
             </p>
           )}
         </div>
@@ -260,8 +335,7 @@ export default function CommunityProjectBoard() {
         {/* Tablero */}
         <div className="grid gap-4 md:grid-cols-3">
           {columns.map((column) => {
-            const columnTasks =
-              tasksByColumn[column.id as ColumnId] ?? [];
+            const columnTasks = tasksByColumn[column.id as ColumnId] ?? [];
 
             return (
               <div
@@ -291,43 +365,83 @@ export default function CommunityProjectBoard() {
                   </div>
                 ) : (
                   <div className="flex flex-1 flex-col gap-3">
-                    {columnTasks.map((task) => (
-                      <article
-                        key={task.id}
-                        className="cursor-default rounded-xl bg-white p-4 text-sm shadow-sm ring-1 ring-slate-200"
-                        draggable={canInteract || undefined}
-                        onDragStart={() => handleDragStart(task.id)}
-                        onDragEnd={handleDragEnd}
-                      >
-                        <header className="mb-2 flex items-start justify-between gap-2">
-                          <h3 className="text-sm font-semibold text-slate-900">
-                            {task.title}
-                          </h3>
-                          <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-600">
-                            {task.layer}
-                          </span>
-                        </header>
-                        <p className="mb-3 text-xs text-slate-600">
-                          {task.description}
-                        </p>
-                        <div className="mb-2 flex items-center justify-between text-xs text-slate-600">
-                          <span>Prioridad: {task.priority}</span>
-                          <span className="font-semibold text-slate-900">
-                            {formatPrice(task.price)}
-                          </span>
-                        </div>
+                    {columnTasks.map((task) => {
+                      const isAssignedToMe =
+                        currentEmail && task.assigneeEmail === currentEmail;
 
-                        {!isOwner && session?.user?.email && (
-                          <button
-                            type="button"
-                            onClick={() => handleSelectTask(task.id)}
-                            className="mt-2 w-full rounded-lg border border-blue-500 px-3 py-1 text-xs font-semibold text-blue-600 hover:bg-blue-50"
-                          >
-                            Tomar esta tarea
-                          </button>
-                        )}
-                      </article>
-                    ))}
+                      const isMutating = mutatingTaskId === task.id;
+
+                      // Mensaje solo en DOING
+                      const showAssignmentMessage =
+                        isAssignedToMe && task.columnId === 'doing';
+
+                      return (
+                        <article
+                          key={task.id}
+                          className="cursor-default rounded-xl bg-white p-4 text-sm shadow-sm ring-1 ring-slate-200"
+                          draggable={
+                            canInteract && task.columnId !== 'done'
+                              ? true
+                              : undefined
+                          }
+                          onDragStart={() => handleDragStart(task.id, task.columnId)}
+                          onDragEnd={handleDragEnd}
+                        >
+                          <header className="mb-2 flex items-start justify-between gap-2">
+                            <h3 className="text-sm font-semibold text-slate-900">
+                              {task.title}
+                            </h3>
+                            <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-600">
+                              {task.layer}
+                            </span>
+                          </header>
+
+                          {/* ✅ Avatar centrado: se mantiene también en DONE */}
+                          {task.assigneeEmail && task.columnId !== 'todo' && (
+                            <div className="mb-2 flex justify-center">
+                              {task.assigneeAvatar ? (
+                                <img
+                                  src={task.assigneeAvatar}
+                                  alt={task.assigneeEmail}
+                                  className="h-10 w-10 rounded-full border border-slate-200 object-cover"
+                                  referrerPolicy="no-referrer"
+                                  onError={(e) => {
+                                    // fallback si Google bloquea la URL
+                                    (e.currentTarget as HTMLImageElement).style.display = 'none';
+                                  }}
+                                />
+                              ) : (
+                                <div className="flex h-10 w-10 items-center justify-center rounded-full border border-slate-200 bg-slate-100 text-xs font-semibold text-slate-700">
+                                  {task.assigneeEmail.charAt(0).toUpperCase()}
+                                </div>
+                              )}
+                            </div>
+                          )}
+
+                          <p className="mb-3 text-xs text-slate-600">
+                            {task.description}
+                          </p>
+                          <div className="mb-1 flex items-center justify-between text-xs text-slate-600">
+                            <span>Prioridad: {task.priority}</span>
+                            <span className="font-semibold text-slate-900">
+                              {formatPrice(task.price)}
+                            </span>
+                          </div>
+
+                          {showAssignmentMessage && (
+                            <p className="mt-1 text-[11px] text-emerald-600">
+                              Esta tarea está asignada a ti.
+                            </p>
+                          )}
+
+                          {isMutating && (
+                            <p className="mt-1 text-[11px] text-slate-400">
+                              Actualizando…
+                            </p>
+                          )}
+                        </article>
+                      );
+                    })}
                   </div>
                 )}
               </div>
