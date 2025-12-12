@@ -208,8 +208,7 @@ export default function CommunityProjectBoardPage() {
   );
 
   const handleSocketEvent = useCallback(
-    (event: any) => {
-      const updatedTask: BoardTask | undefined = event?.task ?? event;
+    (updatedTask: BoardTask) => {
       if (!updatedTask) return;
 
       const taskId = resolveTaskId(updatedTask);

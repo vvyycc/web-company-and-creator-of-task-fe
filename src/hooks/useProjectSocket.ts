@@ -1,27 +1,35 @@
-import { useEffect, useRef } from 'react';
-import { io, Socket } from 'socket.io-client';
+import { useEffect } from 'react';
+import { io } from 'socket.io-client';
 
-export function useProjectSocket(projectId: string | undefined, onEvent: (event: any) => void) {
-  const socketRef = useRef<Socket | null>(null);
+type TaskUpdatedEvent = {
+  projectId: string;
+  task: any;
+};
 
+export function useProjectSocket(
+  projectId: string | undefined,
+  onTaskUpdate: (task: any) => void
+) {
   useEffect(() => {
     if (!projectId) return;
 
-    const socket = io('http://localhost:4000', { transports: ['websocket'] });
-    socketRef.current = socket;
+    const socketUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:4000';
+    const socket = io(socketUrl, {
+      transports: ['websocket'],
+    });
 
     socket.on('connect', () => {
       socket.emit('join_project', projectId);
     });
 
-    socket.on('task_updated', (data) => onEvent(data));
-    socket.on('task_claimed', (data) => onEvent(data));
-    socket.on('task_verified', (data) => onEvent(data));
+    socket.on('task_updated', (event: TaskUpdatedEvent) => {
+      if (event?.projectId === projectId) {
+        onTaskUpdate(event.task);
+      }
+    });
 
     return () => {
       socket.disconnect();
     };
-  }, [projectId, onEvent]);
-
-  return socketRef.current;
+  }, [projectId, onTaskUpdate]);
 }
