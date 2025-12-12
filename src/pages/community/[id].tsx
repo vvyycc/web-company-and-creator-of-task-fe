@@ -3,6 +3,7 @@ import { useRouter } from 'next/router';
 import { useEffect, useMemo, useState } from 'react';
 import { useSession } from 'next-auth/react';
 import Link from 'next/link';
+import { io as ioClient, Socket } from "socket.io-client";
 
 type ColumnId = 'todo' | 'doing' | 'done';
 type TaskCategory =
@@ -47,6 +48,8 @@ interface BoardResponse {
 
 const API_BASE =
   process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:4000';
+
+let socket: Socket | null = null;
 
 const formatPrice = (value: number) =>
   new Intl.NumberFormat('es-ES', {
@@ -124,6 +127,47 @@ export default function CommunityProjectBoard() {
 
     loadBoard();
   }, [router.isReady, id, router]);
+  useEffect(() => {
+  if (!project?.id) return;
+
+  // 1) Crear socket una sola vez
+  if (!socket) {
+    socket = ioClient(API_BASE, {
+      withCredentials: true,
+      transports: ["websocket"],
+      reconnection: true,
+    });
+
+    // (Opcional) Debug: ver eventos y estado
+    socket.on("connect", () => console.log("[socket] connected", socket?.id));
+    socket.on("disconnect", (r) => console.log("[socket] disconnected", r));
+    socket.on("connect_error", (e) => console.log("[socket] connect_error", e.message));
+  }
+
+  // 2) Join SIEMPRE al conectar (y también al montar)
+  const joinRoom = () => {
+    socket?.emit("community:join", { projectId: project.id });
+    // console.log("[socket] join emitted", project.id);
+  };
+
+  socket.on("connect", joinRoom);
+  joinRoom();
+
+  // 3) Listener del board
+  const handleBoardUpdated = (payload: { projectId: string; tasks: BoardTask[] }) => {
+    if (payload.projectId !== project.id) return;
+    setTasks(payload.tasks);
+  };
+
+  socket.on("community:boardUpdated", handleBoardUpdated);
+
+  // 4) Cleanup
+  return () => {
+    socket?.off("connect", joinRoom);
+    socket?.off("community:boardUpdated", handleBoardUpdated);
+    socket?.emit("community:leave", { projectId: project.id });
+  };
+}, [project?.id]);
 
   // --------- Drag & drop ---------
   const handleDragStart = (taskId: string, columnId: ColumnId) => {
