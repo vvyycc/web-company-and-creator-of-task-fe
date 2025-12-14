@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { useRouter } from 'next/router';
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useSession } from 'next-auth/react';
 import CommunityProjectError from '@/components/CommunityProjectError';
 import { useProjectSocket } from '@/hooks/useProjectSocket';
 
@@ -16,7 +17,9 @@ type BoardTask = {
   priority?: number;
   assigneeName?: string;
   assigneeEmail?: string;
+  assignedToEmail?: string;
   column?: { _id?: string; id?: string; title?: string } | string;
+  verificationStatus?: 'SUBMITTED' | 'APPROVED' | 'REJECTED';
 };
 
 type BoardColumn = {
@@ -31,6 +34,87 @@ type BoardColumn = {
 type BoardResponse = {
   columns: BoardColumn[];
   tasks?: BoardTask[];
+  project?: CommunityProject;
+};
+
+type CommunityProject = {
+  id: string;
+  title: string;
+  ownerEmail?: string;
+};
+
+type NoteModalProps = {
+  title: string;
+  confirmLabel: string;
+  loading?: boolean;
+  error?: string | null;
+  onConfirm: (notes: string) => void;
+  onClose: () => void;
+  confirmClassName?: string;
+};
+
+const NoteModal = ({
+  title,
+  confirmLabel,
+  loading,
+  error,
+  onConfirm,
+  onClose,
+  confirmClassName,
+}: NoteModalProps) => {
+  const [notes, setNotes] = useState('');
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+      <div className="w-full max-w-lg rounded-xl bg-slate-900 p-6 text-white shadow-2xl">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="text-xl font-semibold">{title}</h3>
+            <p className="mt-1 text-sm text-slate-300">Comparte notas para el revisor.</p>
+          </div>
+          <button
+            onClick={onClose}
+            className="text-slate-400 transition hover:text-white"
+            aria-label="Cerrar"
+          >
+            ✕
+          </button>
+        </div>
+
+        <div className="mt-4">
+          <label className="text-sm font-semibold text-slate-200">Notas</label>
+          <textarea
+            className="mt-2 w-full rounded-lg border border-slate-700 bg-slate-950 p-2 text-sm text-white"
+            rows={4}
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            placeholder="Detalles relevantes, cambios hechos, pruebas realizadas…"
+          />
+        </div>
+
+        {error && <p className="mt-3 text-sm text-red-400">{error}</p>}
+
+        <div className="mt-6 flex justify-end gap-3">
+          <button
+            onClick={onClose}
+            className="rounded-lg border border-slate-700 px-4 py-2 text-sm font-semibold text-slate-200 transition hover:bg-slate-800"
+            disabled={loading}
+          >
+            Cancelar
+          </button>
+          <button
+            onClick={() => onConfirm(notes)}
+            disabled={loading}
+            className={`rounded-lg px-4 py-2 text-sm font-semibold text-white transition ${
+              confirmClassName || 'bg-blue-600 hover:bg-blue-700'
+            } ${loading ? 'opacity-70' : ''}`}
+          >
+            {loading ? 'Enviando…' : confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 };
 
 export default function CommunityProjectBoardPage() {
@@ -39,13 +123,22 @@ export default function CommunityProjectBoardPage() {
   const { id } = router.query;
 
   const projectId = typeof id === 'string' ? id : undefined;
+  const { data: session } = useSession();
 
   const [columns, setColumns] = useState<BoardColumn[]>([]);
   const [tasks, setTasks] = useState<BoardTask[]>([]);
+  const [project, setProject] = useState<CommunityProject | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notFound, setNotFound] = useState(false);
   const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null);
+  const [submitModalTask, setSubmitModalTask] = useState<BoardTask | null>(null);
+  const [reviewModal, setReviewModal] = useState<{
+    task: BoardTask;
+    approved: boolean;
+  } | null>(null);
+  const [actionLoading, setActionLoading] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const resolveColumnId = useCallback((task: BoardTask) => {
     if (!task) return '';
@@ -154,6 +247,10 @@ export default function CommunityProjectBoardPage() {
           (data as BoardResponse).tasks
         );
 
+        if ((data as BoardResponse).project) {
+          setProject((data as BoardResponse).project || null);
+        }
+
         setColumns(normalizedColumns);
         setTasks(normalizedTasks);
       } catch (err: any) {
@@ -166,6 +263,24 @@ export default function CommunityProjectBoardPage() {
 
     fetchBoard();
   }, [API_BASE, normalizeColumns, normalizeTasks, projectId, router.isReady]);
+
+  useEffect(() => {
+    if (!router.isReady || !projectId || project?.ownerEmail) return;
+
+    const fetchProject = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/community/projects/${projectId}`);
+        if (res.ok) {
+          const data = await res.json();
+          setProject(data.project ?? data ?? null);
+        }
+      } catch (err) {
+        console.error('[community] Error fetching project metadata', err);
+      }
+    };
+
+    fetchProject();
+  }, [API_BASE, project?.ownerEmail, projectId, router.isReady]);
 
   const moveTaskLocally = useCallback(
     (taskId: string, targetColumnId: string) => {
@@ -229,6 +344,80 @@ export default function CommunityProjectBoardPage() {
 
   useProjectSocket(projectId, handleSocketEvent);
 
+  const statusBadgeClasses: Record<string, string> = {
+    TODO: 'bg-slate-200 text-slate-800',
+    IN_PROGRESS: 'bg-blue-100 text-blue-800',
+    IN_REVIEW: 'bg-amber-100 text-amber-800',
+    DONE: 'bg-emerald-100 text-emerald-800',
+    REJECTED: 'bg-red-100 text-red-800',
+  };
+
+  const verificationBadgeLabel: Record<string, string> = {
+    SUBMITTED: 'En revisión',
+    APPROVED: 'Aprobada',
+    REJECTED: 'Rechazada',
+  };
+
+  const verificationBadgeClasses: Record<string, string> = {
+    SUBMITTED: 'bg-amber-100 text-amber-800',
+    APPROVED: 'bg-emerald-100 text-emerald-800',
+    REJECTED: 'bg-red-100 text-red-800',
+  };
+
+  const handleSubmitForReview = async (task: BoardTask, notes: string) => {
+    const taskId = resolveTaskId(task);
+    if (!taskId || !session?.user?.email) return;
+
+    try {
+      setActionLoading(true);
+      setActionError(null);
+
+      const res = await fetch(`${API_BASE}/verification/tasks/${taskId}/submit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ devEmail: session.user.email, notes }),
+      });
+
+      if (!res.ok) {
+        const payload = await res.json().catch(() => ({}));
+        throw new Error(payload?.message || 'No se pudo enviar a revisión.');
+      }
+
+      setSubmitModalTask(null);
+    } catch (err: any) {
+      setActionError(err.message || 'No se pudo enviar a revisión.');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleReviewAction = async (task: BoardTask, approved: boolean, notes: string) => {
+    const taskId = resolveTaskId(task);
+    if (!taskId || !session?.user?.email) return;
+
+    try {
+      setActionLoading(true);
+      setActionError(null);
+
+      const res = await fetch(`${API_BASE}/verification/tasks/${taskId}/review`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reviewerEmail: session.user.email, approved, notes }),
+      });
+
+      if (!res.ok) {
+        const payload = await res.json().catch(() => ({}));
+        throw new Error(payload?.message || 'No se pudo actualizar la revisión.');
+      }
+
+      setReviewModal(null);
+    } catch (err: any) {
+      setActionError(err.message || 'No se pudo actualizar la revisión.');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
   if (loading) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-slate-50 p-6">
@@ -262,6 +451,14 @@ export default function CommunityProjectBoardPage() {
           >
             Volver a la ficha
           </Link>
+          {session?.user?.email && project?.ownerEmail === session.user.email && (
+            <Link
+              href={`/community/projects/${id}/review`}
+              className="rounded-lg bg-amber-500 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-amber-600"
+            >
+              Revisión
+            </Link>
+          )}
         </div>
 
         {error && <p className="text-sm text-red-600">{error}</p>}
@@ -313,11 +510,63 @@ export default function CommunityProjectBoardPage() {
                             {task.description && (
                               <p className="text-sm text-slate-600">{task.description}</p>
                             )}
+                            <div className="mt-2 flex flex-wrap gap-2 text-xs font-semibold">
+                              {task.status && (
+                                <span
+                                  className={`rounded-full px-2 py-1 ${
+                                    statusBadgeClasses[task.status] || 'bg-slate-200 text-slate-800'
+                                  }`}
+                                >
+                                  {task.status.replace('_', ' ')}
+                                </span>
+                              )}
+                              {task.verificationStatus && (
+                                <span
+                                  className={`rounded-full px-2 py-1 ${
+                                    verificationBadgeClasses[task.verificationStatus] || 'bg-slate-200 text-slate-800'
+                                  }`}
+                                >
+                                  {verificationBadgeLabel[task.verificationStatus] || task.verificationStatus}
+                                </span>
+                              )}
+                            </div>
                             {assigneeLabel && (
                               <p className="mt-2 text-xs font-semibold text-blue-600">
                                 Asignada a: {assigneeLabel}
                               </p>
                             )}
+                            <div className="mt-3 flex flex-wrap gap-2">
+                              {session?.user?.email &&
+                                (task.assignedToEmail || task.assigneeEmail) === session.user.email &&
+                                (task.status === 'IN_PROGRESS' || task.status === 'REJECTED') && (
+                                  <button
+                                    onClick={() => setSubmitModalTask(task)}
+                                    className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-blue-700"
+                                  >
+                                    Enviar a revisión
+                                  </button>
+                                )}
+
+                              {session?.user?.email &&
+                                project?.ownerEmail === session.user.email &&
+                                task.status === 'IN_REVIEW' &&
+                                task.verificationStatus === 'SUBMITTED' && (
+                                  <>
+                                    <button
+                                      onClick={() => setReviewModal({ task, approved: true })}
+                                      className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-emerald-700"
+                                    >
+                                      Aprobar
+                                    </button>
+                                    <button
+                                      onClick={() => setReviewModal({ task, approved: false })}
+                                      className="rounded-lg bg-red-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-red-700"
+                                    >
+                                      Rechazar
+                                    </button>
+                                  </>
+                                )}
+                            </div>
                           </div>
                         );
                       })
@@ -331,6 +580,41 @@ export default function CommunityProjectBoardPage() {
           </div>
         )}
       </div>
+
+      {submitModalTask && (
+        <NoteModal
+          title="Enviar a revisión"
+          confirmLabel="Enviar"
+          loading={actionLoading}
+          error={actionError}
+          onClose={() => {
+            if (actionLoading) return;
+            setActionError(null);
+            setSubmitModalTask(null);
+          }}
+          onConfirm={(notes) => handleSubmitForReview(submitModalTask, notes)}
+        />
+      )}
+
+      {reviewModal && (
+        <NoteModal
+          title={reviewModal.approved ? 'Aprobar tarea' : 'Rechazar tarea'}
+          confirmLabel={reviewModal.approved ? 'Aprobar' : 'Rechazar'}
+          confirmClassName={
+            reviewModal.approved
+              ? 'bg-emerald-600 hover:bg-emerald-700'
+              : 'bg-red-600 hover:bg-red-700'
+          }
+          loading={actionLoading}
+          error={actionError}
+          onClose={() => {
+            if (actionLoading) return;
+            setActionError(null);
+            setReviewModal(null);
+          }}
+          onConfirm={(notes) => handleReviewAction(reviewModal.task, reviewModal.approved, notes)}
+        />
+      )}
     </main>
   );
 }
