@@ -111,7 +111,7 @@ export default function GeneratorPage() {
     }
   }, [session?.user?.email]);
 
-  // 🔹 Horas totales: usa estimation.totalHours si es > 0,
+  // ✅ Total horas: usa estimation.totalHours si es > 0,
   // si no, las recalcula a partir de las tareas.
   const totalHours = useMemo(() => {
     if (!estimation) return 0;
@@ -124,22 +124,42 @@ export default function GeneratorPage() {
     return estimation.tasks.reduce((sum, t) => sum + getTaskHours(t), 0);
   }, [estimation]);
 
-  const totalTasksPrice = useMemo(
-    () => safeNumber(estimation?.totalTasksPrice),
-    [estimation?.totalTasksPrice]
-  );
-  const platformFeeAmount = useMemo(
-    () => safeNumber(estimation?.platformFeeAmount),
-    [estimation?.platformFeeAmount]
-  );
-  const grandTotalClientCost = useMemo(
-    () =>
-      safeNumber(
-        estimation?.grandTotalClientCost ??
-          totalTasksPrice + platformFeeAmount
-      ),
-    [estimation?.grandTotalClientCost, totalTasksPrice, platformFeeAmount]
-  );
+  // ✅ Total tareas: si el backend lo manda a 0 tras regenerar,
+  // lo recalculamos SIEMPRE desde tasks (que es la fuente real).
+  const totalTasksPrice = useMemo(() => {
+    if (!estimation) return 0;
+
+    const backendTotal = safeNumber(estimation.totalTasksPrice);
+    if (backendTotal > 0) return backendTotal;
+
+    if (!Array.isArray(estimation.tasks)) return 0;
+
+    return estimation.tasks.reduce(
+      (sum, t) => sum + safeNumber(t.taskPrice ?? t.price ?? 0),
+      0
+    );
+  }, [estimation]);
+
+  // ✅ Fuerza 1% si viene vacío/0
+  const platformFeePercent = useMemo(() => {
+    if (!estimation) return 1;
+    const pf = safeNumber(estimation.platformFeePercent);
+    return pf > 0 ? pf : 1;
+  }, [estimation]);
+
+  // ✅ Comisión: derivada del totalTasksPrice (robusto)
+  const platformFeeAmount = useMemo(() => {
+    const amount = (totalTasksPrice * platformFeePercent) / 100;
+    return +amount.toFixed(2);
+  }, [totalTasksPrice, platformFeePercent]);
+
+  // ✅ Total cliente: derivado (robusto)
+  const grandTotalClientCost = useMemo(() => {
+    const backend = safeNumber(estimation?.grandTotalClientCost);
+    // Si backend viene bien y es >0, puedes usarlo; si no, recomputa
+    if (backend > 0) return backend;
+    return +(totalTasksPrice + platformFeeAmount).toFixed(2);
+  }, [estimation?.grandTotalClientCost, totalTasksPrice, platformFeeAmount]);
 
   const handleGenerateTasks = async () => {
     try {
@@ -180,7 +200,16 @@ export default function GeneratorPage() {
       }
 
       const data = (await res.json()) as { project: ProjectEstimation };
-      setEstimation(data.project);
+
+      // ✅ Normalización defensiva mínima (por si el backend manda percent=0 o totales vacíos)
+      const proj = data.project;
+      const fixed: ProjectEstimation = {
+        ...proj,
+        platformFeePercent:
+          safeNumber(proj.platformFeePercent) > 0 ? proj.platformFeePercent : 1,
+      };
+
+      setEstimation(fixed);
     } catch (err: any) {
       console.error('[generator] Error generando tareas', err);
       setError(
@@ -199,36 +228,56 @@ export default function GeneratorPage() {
       setPublishing(true);
       setPublishError(null);
 
+      const ownerEmailResolved =
+        (estimation as any).ownerEmail || session?.user?.email || null;
+
+      const projectTitleResolved =
+        (estimation as any).projectTitle || (estimation as any).title || null;
+
+      const projectDescriptionResolved =
+        (estimation as any).projectDescription ||
+        (estimation as any).description ||
+        null;
+
+      if (!ownerEmailResolved || !projectTitleResolved || !projectDescriptionResolved) {
+        setPublishError('Faltan datos para publicar (email/título/descripción).');
+        return;
+      }
+
+      // ✅ payload coherente (incluye totales recalculados)
+      const estimationPayload = {
+        ...estimation,
+        ownerEmail: ownerEmailResolved,
+        projectTitle: projectTitleResolved,
+        projectDescription: projectDescriptionResolved,
+        platformFeePercent,
+        totalTasksPrice,
+        platformFeeAmount,
+        grandTotalClientCost,
+      };
+
       const res = await fetch(`${API_BASE}/community/projects`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          ownerEmail: estimation.ownerEmail,
-          projectTitle: estimation.projectTitle,
-          projectDescription: estimation.projectDescription,
-          estimation,
+          ownerEmail: ownerEmailResolved,
+          projectTitle: projectTitleResolved,
+          projectDescription: projectDescriptionResolved,
+          estimation: estimationPayload,
         }),
       });
 
+      const data = await res.json().catch(() => ({} as any));
+
       if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        console.error(
-          '[generator] Error HTTP publicando proyecto',
-          res.status,
-          data
-        );
-        throw new Error(
-          data.error || 'No se pudo publicar el proyecto en la comunidad'
-        );
+        console.error('[generator] Error HTTP publicando proyecto', res.status, data);
+        throw new Error(data.error || 'No se pudo publicar el proyecto en la comunidad');
       }
 
-      const data = (await res.json()) as { id: string; publicUrl: string };
       router.push(data.publicUrl || `/community/${data.id}`);
     } catch (err: any) {
       console.error('[generator] Error publishing project', err);
-      setPublishError(
-        err.message || 'No se pudo publicar el proyecto en la comunidad'
-      );
+      setPublishError(err.message || 'No se pudo publicar el proyecto en la comunidad');
     } finally {
       setPublishing(false);
     }
@@ -397,9 +446,7 @@ export default function GeneratorPage() {
                         {Number(task.hourlyRate ?? 30).toFixed(2)} € / h
                       </td>
                       <td className="px-4 py-2 text-slate-900">
-                        {formatPrice(
-                          Number(task.taskPrice ?? task.price ?? 0)
-                        )}
+                        {formatPrice(Number(task.taskPrice ?? task.price ?? 0))}
                       </td>
                     </tr>
                   ))}
@@ -411,28 +458,20 @@ export default function GeneratorPage() {
             <div className="mt-4 grid gap-3 text-sm text-slate-700 md:grid-cols-3">
               <p>
                 Horas totales estimadas:{' '}
-                <span className="font-semibold">
-                  {totalHours.toFixed(2)}
-                </span>
+                <span className="font-semibold">{totalHours.toFixed(2)}</span>
               </p>
               <p>
                 Presupuesto tareas:{' '}
-                <span className="font-semibold">
-                  {formatPrice(totalTasksPrice)}
-                </span>
+                <span className="font-semibold">{formatPrice(totalTasksPrice)}</span>
               </p>
               <p>
-                Comisión plataforma (1%):{' '}
-                <span className="font-semibold">
-                  {formatPrice(platformFeeAmount)}
-                </span>
+                Comisión plataforma ({platformFeePercent}%):{' '}
+                <span className="font-semibold">{formatPrice(platformFeeAmount)}</span>
               </p>
             </div>
             <p className="mt-2 text-sm text-slate-700">
               Coste total estimado para el cliente:{' '}
-              <span className="font-semibold">
-                {formatPrice(grandTotalClientCost)}
-              </span>
+              <span className="font-semibold">{formatPrice(grandTotalClientCost)}</span>
             </p>
 
             {publishError && (
