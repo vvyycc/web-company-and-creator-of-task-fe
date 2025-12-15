@@ -1,7 +1,8 @@
 // src/pages/community/index.tsx
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useSession } from "next-auth/react";
+import { io as ioClient, Socket } from "socket.io-client";
 
 const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:4000";
 
@@ -17,21 +18,16 @@ interface CommunityListItem {
 }
 
 const formatPrice = (value: number) =>
-  new Intl.NumberFormat("es-ES", {
-    style: "currency",
-    currency: "EUR",
-  }).format(value);
+  new Intl.NumberFormat("es-ES", { style: "currency", currency: "EUR" }).format(value);
 
 const formatDate = (value?: string) => {
   if (!value) return "";
   const d = new Date(value);
   if (Number.isNaN(d.getTime())) return "";
-  return d.toLocaleDateString("es-ES", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-  });
+  return d.toLocaleDateString("es-ES", { day: "2-digit", month: "2-digit", year: "numeric" });
 };
+
+let socket: Socket | null = null;
 
 export default function CommunityIndexPage() {
   const { data: session } = useSession();
@@ -43,9 +39,10 @@ export default function CommunityIndexPage() {
   const [deleteErrors, setDeleteErrors] = useState<Record<string, string>>({});
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
-  // ✅ Modal
-  const [projectToDelete, setProjectToDelete] =
-    useState<CommunityListItem | null>(null);
+  const [projectToDelete, setProjectToDelete] = useState<CommunityListItem | null>(null);
+
+  // ✅ banner de eventos en tiempo real
+  const [realtimeBanner, setRealtimeBanner] = useState<string | null>(null);
 
   useEffect(() => {
     const loadProjects = async () => {
@@ -56,9 +53,7 @@ export default function CommunityIndexPage() {
         const res = await fetch(`${API_BASE}/community/projects`);
         if (!res.ok) {
           const data = await res.json().catch(() => ({}));
-          throw new Error(
-            data.error || "No se pudieron cargar los proyectos de comunidad"
-          );
+          throw new Error(data.error || "No se pudieron cargar los proyectos de comunidad");
         }
 
         const data = (await res.json()) as CommunityListItem[];
@@ -74,11 +69,53 @@ export default function CommunityIndexPage() {
     loadProjects();
   }, []);
 
-  // ✅ Abre modal (y valida permisos antes)
+  // ✅ SOCKET: escuchar create/delete de proyectos (lista)
+  useEffect(() => {
+    if (!socket) {
+      socket = ioClient(API_BASE, {
+        withCredentials: true,
+        transports: ["websocket"],
+        reconnection: true,
+      });
+
+      socket.on("connect", () => console.log("[socket] connected", socket?.id));
+      socket.on("disconnect", (r) => console.log("[socket] disconnected", r));
+      socket.on("connect_error", (e) => console.log("[socket] connect_error", e.message));
+    }
+
+    // entrar al room global
+    socket.emit("community:list:join");
+
+    const onCreated = (p: CommunityListItem) => {
+      setProjects((prev) => {
+        // evita duplicados si ya lo tenías
+        if (prev.some((x) => x.id === p.id)) return prev;
+        // lo ponemos arriba
+        return [p, ...prev];
+      });
+      setRealtimeBanner(`✅ Nuevo proyecto publicado: "${p.title}"`);
+      setTimeout(() => setRealtimeBanner(null), 4000);
+    };
+
+    const onDeleted = ({ id }: { id: string }) => {
+      setProjects((prev) => prev.filter((p) => p.id !== id));
+      setRealtimeBanner("🗑️ Un proyecto fue eliminado");
+      setTimeout(() => setRealtimeBanner(null), 4000);
+    };
+
+    socket.on("community:projectCreated", onCreated);
+    socket.on("community:projectDeleted", onDeleted);
+
+    return () => {
+      socket?.off("community:projectCreated", onCreated);
+      socket?.off("community:projectDeleted", onDeleted);
+      socket?.emit("community:list:leave");
+    };
+  }, []);
+
   const handleDeleteProject = async (project: CommunityListItem) => {
     const currentEmail = session?.user?.email || "";
 
-    // limpiar error anterior
     setDeleteErrors((prev) => {
       const next = { ...prev };
       delete next[project.id];
@@ -93,8 +130,7 @@ export default function CommunityIndexPage() {
       return;
     }
 
-    const isOwner =
-      currentEmail.toLowerCase() === (project.ownerEmail || "").toLowerCase();
+    const isOwner = currentEmail.toLowerCase() === (project.ownerEmail || "").toLowerCase();
     if (!isOwner) {
       setDeleteErrors((prev) => ({
         ...prev,
@@ -106,7 +142,6 @@ export default function CommunityIndexPage() {
     setProjectToDelete(project);
   };
 
-  // ✅ DELETE real (Aceptar)
   const confirmDeleteProject = async () => {
     if (!projectToDelete) return;
 
@@ -123,50 +158,15 @@ export default function CommunityIndexPage() {
     try {
       setDeletingId(projectToDelete.id);
 
-      // ✅ CLAVE: Esta pantalla es "community", por tanto el delete es en /community/projects/:id
-      const res = await fetch(
-        `${API_BASE}/community/projects/${projectToDelete.id}`,
-        {
-          method: "DELETE",
-          headers: {
-            "x-user-email": currentEmail,
-          },
-        }
-      );
+      // ✅ IMPORTANTE: el delete es /community/projects/:id (no /projects/:id)
+      const res = await fetch(`${API_BASE}/community/projects/${projectToDelete.id}`, {
+        method: "DELETE",
+        headers: {
+          "x-user-email": currentEmail,
+        },
+      });
 
       const data = await res.json().catch(() => ({} as any));
-
-      if (res.status === 401) {
-        setDeleteErrors((prev) => ({
-          ...prev,
-          [projectToDelete.id]: "Debes iniciar sesión para borrar proyectos.",
-        }));
-        return;
-      }
-
-      if (res.status === 403) {
-        setDeleteErrors((prev) => ({
-          ...prev,
-          [projectToDelete.id]:
-            "No autorizado: solo el owner puede borrar este proyecto.",
-        }));
-        return;
-      }
-
-      if (res.status === 409) {
-        setDeleteErrors((prev) => ({
-          ...prev,
-          [projectToDelete.id]:
-            "Este proyecto está publicado. Despublícalo antes de borrarlo.",
-        }));
-        return;
-      }
-
-      if (res.status === 404) {
-        // opcional: si ya no existe, lo quitamos del listado igualmente
-        setProjects((prev) => prev.filter((p) => p.id !== projectToDelete.id));
-        return;
-      }
 
       if (!res.ok) {
         setDeleteErrors((prev) => ({
@@ -176,7 +176,8 @@ export default function CommunityIndexPage() {
         return;
       }
 
-      // ✅ OK: quitar del listado
+      // ✅ No hace falta quitarlo aquí si el socket lo va a quitar,
+      // pero lo dejamos por UX inmediata:
       setProjects((prev) => prev.filter((p) => p.id !== projectToDelete.id));
     } catch (err) {
       console.error("[community-index] Error deleting project", err);
@@ -185,18 +186,17 @@ export default function CommunityIndexPage() {
         [projectToDelete.id]: "Error de red al borrar el proyecto.",
       }));
     } finally {
-      // ✅ cerrar modal SIEMPRE
       setProjectToDelete(null);
       setDeletingId(null);
     }
   };
 
+  const currentEmail = session?.user?.email || "";
+
   if (loading) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-slate-50 p-6">
-        <p className="text-lg font-semibold text-slate-700">
-          Cargando proyectos de la comunidad…
-        </p>
+        <p className="text-lg font-semibold text-slate-700">Cargando proyectos de la comunidad…</p>
       </main>
     );
   }
@@ -205,9 +205,7 @@ export default function CommunityIndexPage() {
     return (
       <main className="flex min-h-screen items-center justify-center bg-slate-50 p-6">
         <div className="w-full max-w-md rounded-2xl bg-white p-8 text-center shadow-lg">
-          <h1 className="mb-2 text-xl font-bold text-slate-900">
-            No se pudieron cargar los proyectos
-          </h1>
+          <h1 className="mb-2 text-xl font-bold text-slate-900">No se pudieron cargar los proyectos</h1>
           <p className="mb-4 text-slate-600">{error}</p>
           <Link
             href="/dashboard"
@@ -223,14 +221,16 @@ export default function CommunityIndexPage() {
   return (
     <main className="min-h-screen bg-slate-50 p-6">
       <div className="mx-auto max-w-6xl space-y-6">
+        {!!realtimeBanner && (
+          <div className="rounded-xl bg-white px-4 py-3 text-sm text-slate-800 shadow-sm ring-1 ring-slate-200">
+            {realtimeBanner}
+          </div>
+        )}
+
         <div className="flex flex-col gap-3 rounded-2xl bg-white p-6 shadow-sm md:flex-row md:items-center md:justify-between">
           <div>
-            <p className="text-xs font-semibold uppercase tracking-wide text-blue-600">
-              Comunidad
-            </p>
-            <h1 className="mt-1 text-3xl font-bold text-slate-900">
-              Proyectos publicados
-            </h1>
+            <p className="text-xs font-semibold uppercase tracking-wide text-blue-600">Comunidad</p>
+            <h1 className="mt-1 text-3xl font-bold text-slate-900">Proyectos publicados</h1>
             <p className="mt-2 text-sm text-slate-600">
               Explora proyectos de otros usuarios y elige tareas en las que colaborar.
             </p>
@@ -253,22 +253,14 @@ export default function CommunityIndexPage() {
 
         {projects.length === 0 ? (
           <div className="rounded-2xl bg-white p-8 text-center shadow-sm">
-            <p className="text-sm text-slate-600">
-              Todavía no hay proyectos publicados en la comunidad.
-            </p>
-            <p className="mt-2 text-sm text-slate-600">
-              Genera un proyecto desde el generador de tareas y publícalo para que
-              otros desarrolladores puedan colaborar.
-            </p>
+            <p className="text-sm text-slate-600">Todavía no hay proyectos publicados en la comunidad.</p>
           </div>
         ) : (
           <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
             {projects.map((project) => {
-              const currentEmail = session?.user?.email || "";
               const isOwner =
                 !!currentEmail &&
-                currentEmail.toLowerCase() ===
-                  (project.ownerEmail || "").toLowerCase();
+                currentEmail.toLowerCase() === (project.ownerEmail || "").toLowerCase();
 
               const deleteErrorMsg = deleteErrors[project.id] || null;
               const isDeleting = deletingId === project.id;
@@ -310,45 +302,26 @@ export default function CommunityIndexPage() {
                     </button>
                   )}
 
-                  <h2 className="mb-1 line-clamp-2 text-sm font-semibold text-slate-900">
-                    {project.title}
-                  </h2>
+                  <h2 className="mb-1 line-clamp-2 text-sm font-semibold text-slate-900">{project.title}</h2>
 
-                  <p className="mb-3 line-clamp-3 text-xs text-slate-600">
-                    {project.description}
-                  </p>
+                  <p className="mb-3 line-clamp-3 text-xs text-slate-600">{project.description}</p>
 
                   <p className="mb-2 text-[11px] text-slate-500">
-                    Publicado por{" "}
-                    <span className="font-medium">{project.ownerEmail}</span>
-                    {project.publishedAt && (
-                      <>
-                        {" · "}
-                        {formatDate(project.publishedAt)}
-                      </>
-                    )}
+                    Publicado por <span className="font-medium">{project.ownerEmail}</span>
+                    {project.publishedAt && <>{" · "}{formatDate(project.publishedAt)}</>}
                   </p>
 
                   <div className="mt-auto flex items-center justify-between text-xs text-slate-600">
                     <span>
-                      Tareas:{" "}
-                      <span className="font-semibold">{project.tasksCount}</span>
+                      Tareas: <span className="font-semibold">{project.tasksCount}</span>
                     </span>
                     <span>
-                      Presupuesto:{" "}
-                      <span className="font-semibold">
-                        {formatPrice(project.totalTasksPrice || 0)}
-                      </span>
+                      Presupuesto: <span className="font-semibold">{formatPrice(project.totalTasksPrice || 0)}</span>
                     </span>
                   </div>
 
-                  {isDeleting && (
-                    <p className="mt-3 text-xs text-slate-400">Borrando…</p>
-                  )}
-
-                  {deleteErrorMsg && (
-                    <p className="mt-3 text-xs text-red-600">{deleteErrorMsg}</p>
-                  )}
+                  {isDeleting && <p className="mt-3 text-xs text-slate-400">Borrando…</p>}
+                  {deleteErrorMsg && <p className="mt-3 text-xs text-red-600">{deleteErrorMsg}</p>}
                 </Link>
               );
             })}
@@ -358,19 +331,12 @@ export default function CommunityIndexPage() {
 
       {/* ✅ MODAL CONFIRMACIÓN */}
       {projectToDelete && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-          role="dialog"
-          aria-modal="true"
-        >
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true">
           <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl">
-            <h2 className="text-lg font-bold text-slate-900">
-              ¿Estás segur@ de borrar el proyecto?
-            </h2>
+            <h2 className="text-lg font-bold text-slate-900">¿Estás segur@ de borrar el proyecto?</h2>
 
             <p className="mt-2 text-sm text-slate-600">
-              <strong>{projectToDelete.title}</strong> se eliminará permanentemente.
-              Esta acción no se puede deshacer.
+              <strong>{projectToDelete.title}</strong> se eliminará permanentemente. Esta acción no se puede deshacer.
             </p>
 
             <div className="mt-6 flex justify-end gap-3">
