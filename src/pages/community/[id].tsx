@@ -5,7 +5,7 @@ import { useSession } from 'next-auth/react';
 import Link from 'next/link';
 import { io as ioClient, Socket } from "socket.io-client";
 
-type ColumnId = 'todo' | 'doing' | 'done';
+type ColumnId = 'todo' | 'doing' | 'review' | 'done'; // ✅ incluye review
 type TaskCategory =
   | 'ARCHITECTURE'
   | 'MODEL'
@@ -13,6 +13,9 @@ type TaskCategory =
   | 'VIEW'
   | 'INFRA'
   | 'QA';
+
+type TaskStatus = 'TODO' | 'IN_PROGRESS' | 'IN_REVIEW' | 'DONE' | 'REJECTED';
+type VerificationStatus = 'NOT_SUBMITTED' | 'SUBMITTED' | 'APPROVED' | 'REJECTED';
 
 interface BoardColumn {
   id: ColumnId;
@@ -30,6 +33,12 @@ interface BoardTask {
   columnId: ColumnId;
   assigneeEmail?: string | null;
   assigneeAvatar?: string | null;
+
+  // ✅ Día 10 (si backend los envía)
+  status?: TaskStatus;
+  verificationStatus?: VerificationStatus;
+  acceptanceCriteria?: string;
+  verificationNotes?: string;
 }
 
 interface BoardProject {
@@ -57,6 +66,35 @@ const formatPrice = (value: number) =>
     currency: 'EUR',
   }).format(value);
 
+// ✅ Helpers UI día 10
+function getTaskBadge(task: BoardTask) {
+  const status =
+    task.status ??
+    (task.columnId === 'done'
+      ? 'DONE'
+      : task.columnId === 'doing'
+      ? 'IN_PROGRESS'
+      : task.columnId === 'review'
+      ? 'IN_REVIEW'
+      : 'TODO');
+
+  const v = task.verificationStatus ?? 'NOT_SUBMITTED';
+
+  if (status === 'IN_REVIEW' || v === 'SUBMITTED') {
+    return { label: 'En revisión', className: 'bg-yellow-100 text-yellow-800' };
+  }
+  if (v === 'APPROVED' || status === 'DONE') {
+    return { label: 'Aprobada', className: 'bg-green-100 text-green-800' };
+  }
+  if (v === 'REJECTED' || status === 'REJECTED') {
+    return { label: 'Rechazada', className: 'bg-red-100 text-red-800' };
+  }
+  if (status === 'IN_PROGRESS') {
+    return { label: 'En progreso', className: 'bg-blue-100 text-blue-800' };
+  }
+  return { label: 'Por hacer', className: 'bg-slate-100 text-slate-800' };
+}
+
 export default function CommunityProjectBoard() {
   const router = useRouter();
   const { id } = router.query;
@@ -70,6 +108,13 @@ export default function CommunityProjectBoard() {
 
   const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null);
   const [mutatingTaskId, setMutatingTaskId] = useState<string | null>(null);
+
+  // ✅ Modal/verificación (Día 10) — lo reutilizamos para submit/approve/reject
+  const [modalOpen, setModalOpen] = useState<null | 'submit' | 'approve' | 'reject'>(null);
+  const [modalTaskId, setModalTaskId] = useState<string | null>(null);
+  const [modalNotes, setModalNotes] = useState<string>('');
+  const [modalErr, setModalErr] = useState<string | null>(null);
+  const [modalLoading, setModalLoading] = useState<boolean>(false);
 
   const currentEmail = session?.user?.email ?? null;
   const currentAvatar = (session?.user as any)?.image ?? null;
@@ -112,10 +157,19 @@ export default function CommunityProjectBoard() {
 
         const data = (await res.json()) as BoardResponse;
 
-        // ⚠️ si el backend devolviera ids duplicados, el drag & drop se rompe.
-        // Con el backend corregido ya no debería pasar.
+        // ✅ Garantizar columna review aunque backend aún no la devuelva
+        const cols = Array.isArray(data.columns) ? [...data.columns] : [];
+        if (!cols.find((c) => c.id === 'review')) {
+          // Insertamos review entre doing y done si existe, si no al final
+          const doingIdx = cols.findIndex((c) => c.id === 'doing');
+          const insertAt = doingIdx >= 0 ? doingIdx + 1 : cols.length;
+          cols.splice(insertAt, 0, { id: 'review', title: 'Revisión', order: 3 } as BoardColumn);
+          // Ajuste suave de order si quieres (opcional)
+          cols.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+        }
+
         setProject(data.project);
-        setColumns(data.columns);
+        setColumns(cols);
         setTasks(data.tasks);
       } catch (err: any) {
         console.error('[community-board] Error cargando tablero', err);
@@ -127,47 +181,43 @@ export default function CommunityProjectBoard() {
 
     loadBoard();
   }, [router.isReady, id, router]);
+
+  // --------- WebSocket boardUpdated ---------
   useEffect(() => {
-  if (!project?.id) return;
+    if (!project?.id) return;
 
-  // 1) Crear socket una sola vez
-  if (!socket) {
-    socket = ioClient(API_BASE, {
-      withCredentials: true,
-      transports: ["websocket"],
-      reconnection: true,
-    });
+    if (!socket) {
+      socket = ioClient(API_BASE, {
+        withCredentials: true,
+        transports: ["websocket"],
+        reconnection: true,
+      });
 
-    // (Opcional) Debug: ver eventos y estado
-    socket.on("connect", () => console.log("[socket] connected", socket?.id));
-    socket.on("disconnect", (r) => console.log("[socket] disconnected", r));
-    socket.on("connect_error", (e) => console.log("[socket] connect_error", e.message));
-  }
+      socket.on("connect", () => console.log("[socket] connected", socket?.id));
+      socket.on("disconnect", (r) => console.log("[socket] disconnected", r));
+      socket.on("connect_error", (e) => console.log("[socket] connect_error", e.message));
+    }
 
-  // 2) Join SIEMPRE al conectar (y también al montar)
-  const joinRoom = () => {
-    socket?.emit("community:join", { projectId: project.id });
-    // console.log("[socket] join emitted", project.id);
-  };
+    const joinRoom = () => {
+      socket?.emit("community:join", { projectId: project.id });
+    };
 
-  socket.on("connect", joinRoom);
-  joinRoom();
+    socket.on("connect", joinRoom);
+    joinRoom();
 
-  // 3) Listener del board
-  const handleBoardUpdated = (payload: { projectId: string; tasks: BoardTask[] }) => {
-    if (payload.projectId !== project.id) return;
-    setTasks(payload.tasks);
-  };
+    const handleBoardUpdated = (payload: { projectId: string; tasks: BoardTask[] }) => {
+      if (payload.projectId !== project.id) return;
+      setTasks(payload.tasks);
+    };
 
-  socket.on("community:boardUpdated", handleBoardUpdated);
+    socket.on("community:boardUpdated", handleBoardUpdated);
 
-  // 4) Cleanup
-  return () => {
-    socket?.off("connect", joinRoom);
-    socket?.off("community:boardUpdated", handleBoardUpdated);
-    socket?.emit("community:leave", { projectId: project.id });
-  };
-}, [project?.id]);
+    return () => {
+      socket?.off("connect", joinRoom);
+      socket?.off("community:boardUpdated", handleBoardUpdated);
+      socket?.emit("community:leave", { projectId: project.id });
+    };
+  }, [project?.id]);
 
   // --------- Drag & drop ---------
   const handleDragStart = (taskId: string, columnId: ColumnId) => {
@@ -180,8 +230,24 @@ export default function CommunityProjectBoard() {
     setDraggedTaskId(null);
   };
 
+  // ✅ Modal helpers
+  const openModalFor = (mode: 'submit' | 'approve' | 'reject', taskId: string) => {
+    setModalErr(null);
+    setModalNotes('');
+    setModalTaskId(taskId);
+    setModalOpen(mode);
+  };
+
+  const closeModal = () => {
+    if (modalLoading) return;
+    setModalOpen(null);
+    setModalTaskId(null);
+    setModalNotes('');
+    setModalErr(null);
+  };
+
   const handleDropOnColumn = async (targetColumn: ColumnId) => {
-    if (!canInteract || !draggedTaskId || !project) return;
+    if (!draggedTaskId || !project) return;
 
     const task = tasks.find((t) => t.id === draggedTaskId);
     if (!task) {
@@ -196,6 +262,46 @@ export default function CommunityProjectBoard() {
     }
 
     try {
+      // ✅ doing -> review => abrir modal (submit-review)
+      if (sourceColumn === 'doing' && targetColumn === 'review') {
+        // Solo el assigned puede mandar a review
+        if (!currentEmail || task.assigneeEmail !== currentEmail) {
+          setDraggedTaskId(null);
+          return;
+        }
+        openModalFor('submit', task.id);
+        setDraggedTaskId(null);
+        return;
+      }
+
+      // ✅ review -> done => owner aprueba (approve-review)
+      if (sourceColumn === 'review' && targetColumn === 'done') {
+        if (!isOwner || !currentEmail) {
+          setDraggedTaskId(null);
+          return;
+        }
+        openModalFor('approve', task.id);
+        setDraggedTaskId(null);
+        return;
+      }
+
+      // ✅ review -> todo => owner rechaza (reject-review)
+      if (sourceColumn === 'review' && targetColumn === 'todo') {
+        if (!isOwner || !currentEmail) {
+          setDraggedTaskId(null);
+          return;
+        }
+        openModalFor('reject', task.id);
+        setDraggedTaskId(null);
+        return;
+      }
+
+      // ⚠️ Mantengo tu lógica original, pero ahora canInteract incluye devs.
+      if (!canInteract) {
+        setDraggedTaskId(null);
+        return;
+      }
+
       // todo -> doing  => assign (asigna avatar)
       if (sourceColumn === 'todo' && targetColumn === 'doing') {
         setMutatingTaskId(task.id);
@@ -219,6 +325,8 @@ export default function CommunityProjectBoard() {
       }
 
       // doing -> done => complete (mantiene avatar)
+      // ✅ Si quieres que DONE sea SOLO por approve desde review:
+      // elimina este bloque.
       else if (sourceColumn === 'doing' && targetColumn === 'done') {
         setMutatingTaskId(task.id);
 
@@ -258,9 +366,9 @@ export default function CommunityProjectBoard() {
         setTasks(data.tasks as BoardTask[]);
       }
 
-      // Bloqueamos:
-      // - todo -> done (no permitido)
-      // - done -> cualquier cosa (done congelado)
+      // Extra opcional: permitir review -> doing (dev continúa) si backend lo soporta
+      // else if (sourceColumn === 'review' && targetColumn === 'doing') { ... }
+
     } catch (err) {
       console.error('[community-board] Error moviendo tarea', err);
     } finally {
@@ -273,12 +381,15 @@ export default function CommunityProjectBoard() {
     const map: Record<ColumnId, BoardTask[]> = {
       todo: [],
       doing: [],
+      review: [],
       done: [],
     };
 
     for (const task of tasks) {
       const col = (task.columnId || 'todo') as ColumnId;
-      map[col].push(task);
+      // Si por cualquier bug llega algo fuera de enum, cae en todo
+      const safeCol: ColumnId = (['todo', 'doing', 'review', 'done'].includes(col) ? col : 'todo') as ColumnId;
+      map[safeCol].push(task);
     }
 
     (Object.keys(map) as ColumnId[]).forEach((col) => {
@@ -287,6 +398,69 @@ export default function CommunityProjectBoard() {
 
     return map;
   }, [tasks]);
+
+  // --------- Día 10: acciones verificación (ahora via endpoints community) ---------
+  const submitForReview = async () => {
+    if (!modalTaskId || !project?.id) return;
+    try {
+      setModalLoading(true);
+      setModalErr(null);
+
+      const res = await fetch(
+        `${API_BASE}/community/projects/${project.id}/tasks/${modalTaskId}/submit-review`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            userEmail: currentEmail,
+            notes: modalNotes,
+          }),
+        }
+      );
+
+      const data = await res.json().catch(() => ({} as any));
+      if (!res.ok) throw new Error(data.error || 'No se pudo enviar a revisión');
+
+      if (Array.isArray(data.tasks)) setTasks(data.tasks as BoardTask[]);
+      closeModal();
+    } catch (e: any) {
+      setModalErr(e.message || 'Error');
+    } finally {
+      setModalLoading(false);
+    }
+  };
+
+  const reviewTask = async (approved: boolean) => {
+    if (!modalTaskId || !project?.id) return;
+    try {
+      setModalLoading(true);
+      setModalErr(null);
+
+      const endpoint = approved ? 'approve-review' : 'reject-review';
+
+      const res = await fetch(
+        `${API_BASE}/community/projects/${project.id}/tasks/${modalTaskId}/${endpoint}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            reviewerEmail: currentEmail,
+            notes: modalNotes,
+          }),
+        }
+      );
+
+      const data = await res.json().catch(() => ({} as any));
+      if (!res.ok) throw new Error(data.error || 'No se pudo revisar la tarea');
+
+      if (Array.isArray(data.tasks)) setTasks(data.tasks as BoardTask[]);
+      closeModal();
+    } catch (e: any) {
+      setModalErr(e.message || 'Error');
+    } finally {
+      setModalLoading(false);
+    }
+  };
 
   // --------- Render de estados especiales ---------
   if (loading || status === 'loading') {
@@ -377,7 +551,7 @@ export default function CommunityProjectBoard() {
         </div>
 
         {/* Tablero */}
-        <div className="grid gap-4 md:grid-cols-3">
+        <div className="grid gap-4 md:grid-cols-4">
           {columns.map((column) => {
             const columnTasks = tasksByColumn[column.id as ColumnId] ?? [];
 
@@ -386,7 +560,8 @@ export default function CommunityProjectBoard() {
                 key={column.id}
                 className="flex min-h-[320px] flex-col rounded-2xl bg-slate-50 p-4"
                 onDragOver={(e) => {
-                  if (!canInteract) return;
+                  // Owners también interactúan para review->done/todo
+                  if (!session?.user?.email) return;
                   e.preventDefault();
                 }}
                 onDrop={(e) => {
@@ -419,19 +594,30 @@ export default function CommunityProjectBoard() {
                       const showAssignmentMessage =
                         isAssignedToMe && task.columnId === 'doing';
 
+                      const badge = getTaskBadge(task);
+
                       return (
                         <article
                           key={task.id}
-                          className="cursor-default rounded-xl bg-white p-4 text-sm shadow-sm ring-1 ring-slate-200"
+                          className="relative cursor-default rounded-xl bg-white p-4 text-sm shadow-sm ring-1 ring-slate-200"
                           draggable={
-                            canInteract && task.columnId !== 'done'
+                            // ✅ devs pueden arrastrar excepto done
+                            // ✅ owner también puede arrastrar desde review a done/todo (y lo usamos en handleDrop)
+                            session?.user?.email && task.columnId !== 'done'
                               ? true
                               : undefined
                           }
                           onDragStart={() => handleDragStart(task.id, task.columnId)}
                           onDragEnd={handleDragEnd}
                         >
-                          <header className="mb-2 flex items-start justify-between gap-2">
+                          {/* Badge estado/verificación */}
+                          <div className="absolute right-3 top-3">
+                            <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${badge.className}`}>
+                              {badge.label}
+                            </span>
+                          </div>
+
+                          <header className="mb-2 flex items-start justify-between gap-2 pr-16">
                             <h3 className="text-sm font-semibold text-slate-900">
                               {task.title}
                             </h3>
@@ -440,7 +626,7 @@ export default function CommunityProjectBoard() {
                             </span>
                           </header>
 
-                          {/* ✅ Avatar centrado: se mantiene también en DONE */}
+                          {/* Avatar centrado */}
                           {task.assigneeEmail && task.columnId !== 'todo' && (
                             <div className="mb-2 flex justify-center">
                               {task.assigneeAvatar ? (
@@ -450,7 +636,6 @@ export default function CommunityProjectBoard() {
                                   className="h-10 w-10 rounded-full border border-slate-200 object-cover"
                                   referrerPolicy="no-referrer"
                                   onError={(e) => {
-                                    // fallback si Google bloquea la URL
                                     (e.currentTarget as HTMLImageElement).style.display = 'none';
                                   }}
                                 />
@@ -465,6 +650,7 @@ export default function CommunityProjectBoard() {
                           <p className="mb-3 text-xs text-slate-600">
                             {task.description}
                           </p>
+
                           <div className="mb-1 flex items-center justify-between text-xs text-slate-600">
                             <span>Prioridad: {task.priority}</span>
                             <span className="font-semibold text-slate-900">
@@ -476,6 +662,23 @@ export default function CommunityProjectBoard() {
                             <p className="mt-1 text-[11px] text-emerald-600">
                               Esta tarea está asignada a ti.
                             </p>
+                          )}
+
+                          {(task.acceptanceCriteria || task.verificationNotes) && (
+                            <div className="mt-3 space-y-2 text-[11px] text-slate-600">
+                              {task.acceptanceCriteria && (
+                                <div>
+                                  <div className="font-semibold text-slate-700">Criterios</div>
+                                  <div className="whitespace-pre-wrap">{task.acceptanceCriteria}</div>
+                                </div>
+                              )}
+                              {task.verificationNotes && (
+                                <div>
+                                  <div className="font-semibold text-slate-700">Notas</div>
+                                  <div className="whitespace-pre-wrap">{task.verificationNotes}</div>
+                                </div>
+                              )}
+                            </div>
                           )}
 
                           {isMutating && (
@@ -493,6 +696,85 @@ export default function CommunityProjectBoard() {
           })}
         </div>
       </div>
+
+      {/* Modal Día 10 */}
+      {modalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="w-full max-w-lg rounded-2xl bg-white p-5 shadow-lg">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-bold text-slate-900">
+                {modalOpen === 'submit' && 'Enviar tarea a revisión'}
+                {modalOpen === 'approve' && 'Aprobar tarea'}
+                {modalOpen === 'reject' && 'Rechazar tarea'}
+              </h3>
+              <button
+                className="text-slate-500 hover:text-slate-700"
+                onClick={closeModal}
+                disabled={modalLoading}
+              >
+                ✕
+              </button>
+            </div>
+
+            <p className="mt-2 text-xs text-slate-600">
+              Añade notas (opcional). Quedarán guardadas en la verificación.
+            </p>
+
+            <textarea
+              className="mt-3 w-full rounded-lg border border-slate-300 p-2 text-sm"
+              rows={5}
+              value={modalNotes}
+              onChange={(e) => setModalNotes(e.target.value)}
+              placeholder="Notas..."
+              disabled={modalLoading}
+            />
+
+            {modalErr && (
+              <p className="mt-2 text-xs font-semibold text-red-600">{modalErr}</p>
+            )}
+
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                onClick={closeModal}
+                disabled={modalLoading}
+              >
+                Cancelar
+              </button>
+
+              {modalOpen === 'submit' && (
+                <button
+                  className="rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
+                  onClick={submitForReview}
+                  disabled={modalLoading}
+                >
+                  {modalLoading ? 'Enviando…' : 'Enviar'}
+                </button>
+              )}
+
+              {modalOpen === 'approve' && (
+                <button
+                  className="rounded-lg bg-green-600 px-3 py-2 text-xs font-semibold text-white hover:bg-green-700 disabled:opacity-50"
+                  onClick={() => reviewTask(true)}
+                  disabled={modalLoading}
+                >
+                  {modalLoading ? 'Aprobando…' : 'Aprobar'}
+                </button>
+              )}
+
+              {modalOpen === 'reject' && (
+                <button
+                  className="rounded-lg bg-red-600 px-3 py-2 text-xs font-semibold text-white hover:bg-red-700 disabled:opacity-50"
+                  onClick={() => reviewTask(false)}
+                  disabled={modalLoading}
+                >
+                  {modalLoading ? 'Rechazando…' : 'Rechazar'}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
