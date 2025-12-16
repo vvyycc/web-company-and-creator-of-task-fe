@@ -16,6 +16,7 @@ type TaskCategory =
 
 type TaskStatus = 'TODO' | 'IN_PROGRESS' | 'IN_REVIEW' | 'DONE' | 'REJECTED';
 type VerificationStatus = 'NOT_SUBMITTED' | 'SUBMITTED' | 'APPROVED' | 'REJECTED';
+type GithubCheckStatus = 'PENDING' | 'PASSED' | 'FAILED';
 
 interface BoardColumn {
   id: ColumnId;
@@ -33,6 +34,10 @@ interface BoardTask {
   columnId: ColumnId;
   assigneeEmail?: string | null;
   assigneeAvatar?: string | null;
+
+  repoFullName?: string | null;
+  checkStatus?: GithubCheckStatus | null;
+  lastRunUrl?: string | null;
 
   // ✅ Día 10 (si backend los envía)
   status?: TaskStatus;
@@ -65,6 +70,64 @@ const formatPrice = (value: number) =>
     style: 'currency',
     currency: 'EUR',
   }).format(value);
+
+const isPriorityOne = (task: BoardTask) => task.priority === 1;
+
+const isMostPrioritaryAssigned = (tasks: BoardTask[], userEmail: string | null) => {
+  if (!userEmail)
+    return () => false;
+  const assigned = tasks.filter(
+    (t) => t.assigneeEmail === userEmail && typeof t.priority === 'number'
+  );
+  if (!assigned.length) return () => false;
+  const minPriority = Math.min(...assigned.map((t) => t.priority || Number.MAX_SAFE_INTEGER));
+  return (task: BoardTask) => task.priority === minPriority;
+};
+
+function useGithubIntegration(userEmail: string | null) {
+  const [connected, setConnected] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchStatus = async () => {
+    if (!userEmail) {
+      setConnected(false);
+      setError(null);
+      setLoading(false);
+      return;
+    }
+
+    try {
+      setLoading(true);
+      setError(null);
+
+      const res = await fetch(
+        `${API_BASE}/integrations/github/status?userEmail=${encodeURIComponent(userEmail)}`
+      );
+
+      if (!res.ok) throw new Error('No se pudo comprobar la integración de GitHub');
+
+      const data = await res.json().catch(() => ({}));
+      const statusValue = Boolean(
+        (data as any).connected ?? (data as any).isConnected ?? (data as any).status
+      );
+      setConnected(statusValue);
+    } catch (err: any) {
+      console.error('[github] status error', err);
+      setConnected(false);
+      setError(err?.message || 'Error al comprobar GitHub');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userEmail]);
+
+  return { connected, loading, error, reload: fetchStatus };
+}
 
 // ✅ Helpers UI día 10
 function getTaskBadge(task: BoardTask) {
@@ -116,8 +179,16 @@ export default function CommunityProjectBoard() {
   const [modalErr, setModalErr] = useState<string | null>(null);
   const [modalLoading, setModalLoading] = useState<boolean>(false);
 
+  const [linkingTaskId, setLinkingTaskId] = useState<string | null>(null);
+  const [verifyingTaskId, setVerifyingTaskId] = useState<string | null>(null);
+  const [repoInputs, setRepoInputs] = useState<Record<string, string>>({});
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+
   const currentEmail = session?.user?.email ?? null;
   const currentAvatar = (session?.user as any)?.image ?? null;
+
+  const githubIntegration = useGithubIntegration(currentEmail);
 
   const isOwner = useMemo(
     () =>
@@ -130,6 +201,11 @@ export default function CommunityProjectBoard() {
   const canInteract = useMemo(
     () => !!session?.user?.email && !!project && !isOwner,
     [session?.user?.email, project, isOwner]
+  );
+
+  const mostPrioritaryAssigned = useMemo(
+    () => isMostPrioritaryAssigned(tasks, currentEmail),
+    [tasks, currentEmail]
   );
 
   // --------- Cargar tablero desde backend ---------
@@ -462,6 +538,77 @@ export default function CommunityProjectBoard() {
     }
   };
 
+  const handleLinkRepo = async (task: BoardTask) => {
+    if (!project?.id || !currentEmail || !githubIntegration.connected) return;
+    const repo = (repoInputs[task.id] ?? task.repoFullName ?? '').trim();
+    if (!repo) {
+      setActionError('Indica el repositorio como owner/repo.');
+      return;
+    }
+
+    try {
+      setLinkingTaskId(task.id);
+      setActionError(null);
+      setActionMessage(null);
+
+      const res = await fetch(
+        `${API_BASE}/community/projects/${project.id}/tasks/${task.id}/link-repo`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userEmail: currentEmail, repoFullName: repo }),
+        }
+      );
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok)
+        throw new Error((data as any).error || 'No se pudo vincular el repositorio');
+
+      if (Array.isArray((data as any).tasks)) {
+        setTasks((data as any).tasks as BoardTask[]);
+      }
+      setActionMessage('Repositorio vinculado correctamente.');
+    } catch (err: any) {
+      console.error('[github] link repo error', err);
+      setActionError(err?.message || 'Error al vincular el repositorio');
+    } finally {
+      setLinkingTaskId(null);
+    }
+  };
+
+  const handleRunVerification = async (task: BoardTask) => {
+    if (!project?.id || !currentEmail) return;
+
+    try {
+      setVerifyingTaskId(task.id);
+      setActionError(null);
+      setActionMessage(null);
+
+      const res = await fetch(
+        `${API_BASE}/community/projects/${project.id}/tasks/${task.id}/run-verify`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userEmail: currentEmail }),
+        }
+      );
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok)
+        throw new Error((data as any).error || 'No se pudo ejecutar la verificación');
+
+      if (Array.isArray((data as any).tasks)) {
+        setTasks((data as any).tasks as BoardTask[]);
+      }
+      setActionMessage('Verificación solicitada.');
+    } catch (err: any) {
+      console.error('[github] verify error', err);
+      setActionError(err?.message || 'Error al ejecutar la verificación');
+    } finally {
+      setVerifyingTaskId(null);
+    }
+  };
+
   // --------- Render de estados especiales ---------
   if (loading || status === 'loading') {
     return (
@@ -548,6 +695,18 @@ export default function CommunityProjectBoard() {
               Estás viendo tu propio proyecto. Este tablero es de solo lectura para el creador.
             </p>
           )}
+
+          {(actionMessage || actionError) && (
+            <div
+              className={`mt-4 rounded-lg border px-4 py-3 text-xs ${
+                actionMessage
+                  ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                  : 'border-red-200 bg-red-50 text-red-700'
+              }`}
+            >
+              {actionMessage || actionError}
+            </div>
+          )}
         </div>
 
         {/* Tablero */}
@@ -589,6 +748,16 @@ export default function CommunityProjectBoard() {
                         currentEmail && task.assigneeEmail === currentEmail;
 
                       const isMutating = mutatingTaskId === task.id;
+
+                      const canShowGithubSection =
+                        isAssignedToMe &&
+                        task.columnId === 'doing' &&
+                        (isPriorityOne(task) || mostPrioritaryAssigned(task));
+
+                      const repoValue = repoInputs[task.id] ?? task.repoFullName ?? '';
+
+                      const showVerificationActions =
+                        task.columnId === 'review' && (isAssignedToMe || isOwner);
 
                       // Mensaje solo en DOING
                       const showAssignmentMessage =
@@ -662,6 +831,122 @@ export default function CommunityProjectBoard() {
                             <p className="mt-1 text-[11px] text-emerald-600">
                               Esta tarea está asignada a ti.
                             </p>
+                          )}
+
+                          {canShowGithubSection && (
+                            <div className="mt-3 space-y-2 rounded-lg border border-slate-200 bg-slate-50 p-3 text-[11px] text-slate-700">
+                              <div className="flex items-center justify-between text-[12px] font-semibold text-slate-800">
+                                <span>GitHub</span>
+                                {githubIntegration.loading ? (
+                                  <span className="text-slate-500">Comprobando…</span>
+                                ) : githubIntegration.connected ? (
+                                  <span className="text-emerald-600">Conectado</span>
+                                ) : (
+                                  <span className="text-amber-600">No conectado</span>
+                                )}
+                              </div>
+
+                              {githubIntegration.error && (
+                                <p className="text-[11px] text-red-600">
+                                  {githubIntegration.error}
+                                </p>
+                              )}
+
+                              {!githubIntegration.connected ? (
+                                <button
+                                  className="w-full rounded-lg bg-slate-900 px-3 py-2 text-[11px] font-semibold text-white hover:bg-slate-800"
+                                  onClick={() => {
+                                    if (!currentEmail) return;
+                                    window.location.href = `${API_BASE}/integrations/github/login?userEmail=${encodeURIComponent(
+                                      currentEmail
+                                    )}`;
+                                  }}
+                                >
+                                  Conectar GitHub
+                                </button>
+                              ) : task.repoFullName ? (
+                                <div className="flex items-center justify-between gap-2 rounded-lg border border-emerald-100 bg-white px-3 py-2 text-[11px] font-semibold text-emerald-700">
+                                  <span className="truncate">Repo: {task.repoFullName}</span>
+                                  <Link
+                                    href={`https://github.com/${task.repoFullName}`}
+                                    target="_blank"
+                                    className="text-emerald-700 underline"
+                                  >
+                                    Ver
+                                  </Link>
+                                </div>
+                              ) : (
+                                <div className="space-y-2">
+                                  <label className="text-[11px] font-semibold text-slate-700">
+                                    Vincula tu repo
+                                  </label>
+                                  <input
+                                    className="w-full rounded-lg border border-slate-200 px-3 py-2 text-[12px] outline-none focus:border-blue-500"
+                                    placeholder="owner/repo"
+                                    value={repoValue}
+                                    onChange={(e) =>
+                                      setRepoInputs((prev) => ({ ...prev, [task.id]: e.target.value }))
+                                    }
+                                    disabled={linkingTaskId === task.id}
+                                  />
+                                  <button
+                                    className="w-full rounded-lg bg-blue-600 px-3 py-2 text-[11px] font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
+                                    disabled={linkingTaskId === task.id}
+                                    onClick={() => handleLinkRepo(task)}
+                                  >
+                                    {linkingTaskId === task.id ? 'Vinculando…' : 'Vincular repo'}
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          )}
+
+                          {showVerificationActions && (
+                            <div className="mt-3 space-y-2 rounded-lg border border-slate-200 bg-slate-50 p-3 text-[11px] text-slate-700">
+                              <div className="flex items-center justify-between text-[12px] font-semibold text-slate-800">
+                                <span>Verificación</span>
+                                {(() => {
+                                  const check = (task.checkStatus || 'PENDING') as GithubCheckStatus;
+                                  const badgeClasses =
+                                    check === 'PASSED'
+                                      ? 'bg-emerald-100 text-emerald-700'
+                                      : check === 'FAILED'
+                                      ? 'bg-red-100 text-red-700'
+                                      : 'bg-yellow-100 text-yellow-800';
+                                  return (
+                                    <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${badgeClasses}`}>
+                                      {check}
+                                    </span>
+                                  );
+                                })()}
+                              </div>
+
+                              <div className="flex flex-wrap items-center gap-2">
+                                <button
+                                  className="rounded-lg bg-indigo-600 px-3 py-2 text-[11px] font-semibold text-white hover:bg-indigo-700 disabled:opacity-50"
+                                  onClick={() => handleRunVerification(task)}
+                                  disabled={verifyingTaskId === task.id}
+                                >
+                                  {verifyingTaskId === task.id ? 'Ejecutando…' : 'Ejecutar verificación'}
+                                </button>
+
+                                {task.lastRunUrl && (
+                                  <Link
+                                    href={task.lastRunUrl}
+                                    target="_blank"
+                                    className="text-[11px] font-semibold text-indigo-700 underline"
+                                  >
+                                    Última ejecución
+                                  </Link>
+                                )}
+                              </div>
+
+                              {task.checkStatus === 'FAILED' && (
+                                <p className="text-[11px] text-red-600">
+                                  Corrige y vuelve a enviar.
+                                </p>
+                              )}
+                            </div>
                           )}
 
                           {(task.acceptanceCriteria || task.verificationNotes) && (
