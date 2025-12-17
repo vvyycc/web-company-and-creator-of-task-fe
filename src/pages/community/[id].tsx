@@ -52,6 +52,10 @@ interface BoardProject {
   description: string;
   ownerEmail: string;
   published: boolean;
+  projectRepo?: {
+    fullName: string;
+    htmlUrl: string;
+  };
 }
 
 interface BoardResponse {
@@ -211,6 +215,8 @@ export default function CommunityProjectBoard() {
   const [repoInputs, setRepoInputs] = useState<Record<string, string>>({});
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [githubConnectModalOpen, setGithubConnectModalOpen] = useState(false);
+  const [repoInvitationUrl, setRepoInvitationUrl] = useState<string | null>(null);
 
   const currentEmail = session?.user?.email ?? null;
   const currentAvatar = (session?.user as any)?.image ?? null;
@@ -315,12 +321,20 @@ export default function CommunityProjectBoard() {
 
     socket.on("community:boardUpdated", handleBoardUpdated);
 
+    const handleUserInvitedToRepo = (payload: { projectId?: string; userEmail?: string; repoUrl?: string }) => {
+      if (!payload?.userEmail || payload.userEmail !== currentEmail) return;
+      setRepoInvitationUrl(payload.repoUrl || project.projectRepo?.htmlUrl || null);
+    };
+
+    socket.on("community:userInvitedToRepo", handleUserInvitedToRepo);
+
     return () => {
       socket?.off("connect", joinRoom);
       socket?.off("community:boardUpdated", handleBoardUpdated);
+      socket?.off("community:userInvitedToRepo", handleUserInvitedToRepo);
       socket?.emit("community:leave", { projectId: project.id });
     };
-  }, [project?.id]);
+  }, [project?.id, currentEmail, project?.projectRepo?.htmlUrl]);
 
   // --------- Drag & drop ---------
   const handleDragStart = (taskId: string, columnId: ColumnId) => {
@@ -422,7 +436,13 @@ export default function CommunityProjectBoard() {
         );
 
         const data = await res.json().catch(() => ({} as any));
-        if (!res.ok) throw new Error(data.error || 'No se pudo asignar la tarea');
+        if (!res.ok) {
+          if (data?.error === 'github_not_connected_user' || data?.code === 'github_not_connected_user') {
+            setGithubConnectModalOpen(true);
+            return;
+          }
+          throw new Error(data.error || 'No se pudo asignar la tarea');
+        }
 
         setTasks(data.tasks as BoardTask[]);
       }
@@ -733,6 +753,38 @@ export default function CommunityProjectBoard() {
               {actionMessage || actionError}
             </div>
           )}
+
+          {project?.projectRepo && (
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-800">
+              <div className="space-y-1">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-600">Repositorio del proyecto</p>
+                <p className="font-semibold">{project.projectRepo.fullName}</p>
+              </div>
+              <Link
+                href={project.projectRepo.htmlUrl}
+                target="_blank"
+                className="inline-flex items-center justify-center rounded-lg bg-slate-900 px-4 py-2 text-xs font-semibold text-white hover:bg-slate-800"
+              >
+                Abrir en GitHub
+              </Link>
+            </div>
+          )}
+
+          {repoInvitationUrl && (
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs text-emerald-800">
+              <div className="flex items-center gap-2 font-semibold">
+                <span>✅</span>
+                <span>Has sido invitado al repositorio del proyecto</span>
+              </div>
+              <Link
+                href={repoInvitationUrl}
+                target="_blank"
+                className="inline-flex items-center justify-center rounded-lg bg-emerald-600 px-3 py-2 text-[11px] font-semibold text-white hover:bg-emerald-700"
+              >
+                Abrir repositorio
+              </Link>
+            </div>
+          )}
         </div>
 
         {/* Tablero */}
@@ -822,11 +874,11 @@ export default function CommunityProjectBoard() {
                           </header>
 
                           {/* Avatar centrado */}
-                          {task.assigneeEmail && task.columnId !== 'todo' && (
-                            <div className="mb-2 flex justify-center">
-                              {task.assigneeAvatar ? (
-                                <img
-                                  src={task.assigneeAvatar}
+                      {task.assigneeEmail && task.columnId !== 'todo' && (
+                        <div className="mb-2 flex justify-center">
+                          {task.assigneeAvatar ? (
+                            <img
+                              src={task.assigneeAvatar}
                                   alt={task.assigneeEmail}
                                   className="h-10 w-10 rounded-full border border-slate-200 object-cover"
                                   referrerPolicy="no-referrer"
@@ -837,8 +889,14 @@ export default function CommunityProjectBoard() {
                               ) : (
                                 <div className="flex h-10 w-10 items-center justify-center rounded-full border border-slate-200 bg-slate-100 text-xs font-semibold text-slate-700">
                                   {task.assigneeEmail.charAt(0).toUpperCase()}
-                                </div>
-                              )}
+                        </div>
+                      )}
+
+                      {task.assigneeEmail && (
+                        <div className="mb-2 text-[11px] text-slate-700" title="Estás trabajando directamente sobre el repositorio del proyecto">
+                          🔗 Repo conectado
+                        </div>
+                      )}
                             </div>
                           )}
 
@@ -1009,6 +1067,42 @@ export default function CommunityProjectBoard() {
           })}
         </div>
       </div>
+
+      {githubConnectModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="w-full max-w-md rounded-2xl bg-white p-5 shadow-lg">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-bold text-slate-900">Conectar GitHub</h3>
+              <button
+                className="text-slate-500 hover:text-slate-700"
+                onClick={() => setGithubConnectModalOpen(false)}
+              >
+                ✕
+              </button>
+            </div>
+
+            <p className="mt-2 text-xs text-slate-600">
+              Para trabajar en esta tarea debes conectar GitHub.
+            </p>
+
+            <div className="mt-4 flex justify-end">
+              <button
+                className="rounded-lg bg-slate-900 px-4 py-2 text-xs font-semibold text-white hover:bg-slate-800 disabled:opacity-50"
+                onClick={() => {
+                  if (!currentEmail) return;
+                  window.location.href =
+                    `${API_BASE}/integrations/github/login` +
+                    `?userEmail=${encodeURIComponent(currentEmail)}` +
+                    `&returnTo=${encodeURIComponent(`/community/${project?.id ?? ''}`)}`;
+                }}
+                disabled={!currentEmail}
+              >
+                Conectar GitHub
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Modal Día 10 */}
       {modalOpen && (
