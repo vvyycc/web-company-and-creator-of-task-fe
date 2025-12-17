@@ -121,6 +121,33 @@ function useGithubIntegration(userEmail: string | null) {
     }
   };
 
+  const router = useRouter();
+
+useEffect(() => {
+  if (!router.isReady) return;
+
+  const github = router.query.github;
+
+  if (github === "connected") {
+    // refresca estado y limpia query conservando /community/[id]
+    fetchStatus();
+
+    const nextQuery = { ...router.query };
+    delete (nextQuery as any).github;
+    delete (nextQuery as any).githubLogin;
+
+    router.replace({ pathname: router.pathname, query: nextQuery }, undefined, { shallow: true });
+  }
+
+  if (github === "error") {
+    fetchStatus();
+    const nextQuery = { ...router.query };
+    delete (nextQuery as any).github;
+    router.replace({ pathname: router.pathname, query: nextQuery }, undefined, { shallow: true });
+  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [router.isReady, router.query.github]);
+
   useEffect(() => {
     fetchStatus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -136,10 +163,10 @@ function getTaskBadge(task: BoardTask) {
     (task.columnId === 'done'
       ? 'DONE'
       : task.columnId === 'doing'
-      ? 'IN_PROGRESS'
-      : task.columnId === 'review'
-      ? 'IN_REVIEW'
-      : 'TODO');
+        ? 'IN_PROGRESS'
+        : task.columnId === 'review'
+          ? 'IN_REVIEW'
+          : 'TODO');
 
   const v = task.verificationStatus ?? 'NOT_SUBMITTED';
 
@@ -698,11 +725,10 @@ export default function CommunityProjectBoard() {
 
           {(actionMessage || actionError) && (
             <div
-              className={`mt-4 rounded-lg border px-4 py-3 text-xs ${
-                actionMessage
+              className={`mt-4 rounded-lg border px-4 py-3 text-xs ${actionMessage
                   ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
                   : 'border-red-200 bg-red-50 text-red-700'
-              }`}
+                }`}
             >
               {actionMessage || actionError}
             </div>
@@ -857,9 +883,11 @@ export default function CommunityProjectBoard() {
                                   className="w-full rounded-lg bg-slate-900 px-3 py-2 text-[11px] font-semibold text-white hover:bg-slate-800"
                                   onClick={() => {
                                     if (!currentEmail) return;
-                                    window.location.href = `${API_BASE}/integrations/github/login?userEmail=${encodeURIComponent(
-                                      currentEmail
-                                    )}`;
+                                    window.location.href =
+                                      `${API_BASE}/integrations/github/login` +
+                                      `?userEmail=${encodeURIComponent(currentEmail)}` +
+                                      `&returnTo=${encodeURIComponent(`/community/${project.id}`)}`;
+
                                   }}
                                 >
                                   Conectar GitHub
@@ -911,8 +939,8 @@ export default function CommunityProjectBoard() {
                                     check === 'PASSED'
                                       ? 'bg-emerald-100 text-emerald-700'
                                       : check === 'FAILED'
-                                      ? 'bg-red-100 text-red-700'
-                                      : 'bg-yellow-100 text-yellow-800';
+                                        ? 'bg-red-100 text-red-700'
+                                        : 'bg-yellow-100 text-yellow-800';
                                   return (
                                     <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${badgeClasses}`}>
                                       {check}
