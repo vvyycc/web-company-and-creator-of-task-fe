@@ -52,12 +52,15 @@ interface BoardProject {
   description: string;
   ownerEmail: string;
   published: boolean;
+  projectRepo?: string | null;
+  repoJoined?: boolean | null;
 }
 
 interface BoardResponse {
   project: BoardProject;
   columns: BoardColumn[];
   tasks: BoardTask[];
+  repoJoined?: boolean | null;
 }
 
 const API_BASE =
@@ -185,6 +188,23 @@ function getTaskBadge(task: BoardTask) {
   return { label: 'Por hacer', className: 'bg-slate-100 text-slate-800' };
 }
 
+const mapRepoError = (code?: string) => {
+  switch (code) {
+    case 'github_not_connected_user':
+      return 'Conecta tu cuenta de GitHub para unirte al repositorio.';
+    case 'github_not_connected_owner':
+      return 'El owner debe conectar GitHub para que el repositorio esté disponible.';
+    case 'repo_access_required':
+      return 'Necesitas aceptar la invitación del repositorio para colaborar.';
+    case 'github_permissions_missing':
+      return 'Faltan permisos de GitHub para colaborar en el repositorio.';
+    case 'repo_not_created':
+      return 'El repositorio todavía no está disponible. Contacta con el owner.';
+    default:
+      return null;
+  }
+};
+
 export default function CommunityProjectBoard() {
   const router = useRouter();
   const { id } = router.query;
@@ -198,6 +218,11 @@ export default function CommunityProjectBoard() {
 
   const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null);
   const [mutatingTaskId, setMutatingTaskId] = useState<string | null>(null);
+  const [repoJoined, setRepoJoined] = useState<boolean>(false);
+  const [joiningRepo, setJoiningRepo] = useState<boolean>(false);
+  const [repoStatusMessage, setRepoStatusMessage] = useState<string | null>(null);
+  const [repoStatusError, setRepoStatusError] = useState<string | null>(null);
+  const [repoInvitationBanner, setRepoInvitationBanner] = useState<boolean>(false);
 
   // ✅ Modal/verificación (Día 10) — lo reutilizamos para submit/approve/reject
   const [modalOpen, setModalOpen] = useState<null | 'submit' | 'approve' | 'reject'>(null);
@@ -225,10 +250,19 @@ export default function CommunityProjectBoard() {
     [project, session?.user?.email]
   );
 
-  const canInteract = useMemo(
-    () => !!session?.user?.email && !!project && !isOwner,
-    [session?.user?.email, project, isOwner]
-  );
+  const repoAvailable = useMemo(() => !!project?.projectRepo, [project?.projectRepo]);
+
+  const canCollaborate = useMemo(() => {
+    if (!session?.user?.email || !project) return false;
+    if (isOwner) return true;
+    return repoAvailable && !!repoJoined;
+  }, [session?.user?.email, project, isOwner, repoAvailable, repoJoined]);
+
+  useEffect(() => {
+    if (isOwner && !repoJoined) {
+      setRepoJoined(true);
+    }
+  }, [isOwner, repoJoined]);
 
   const mostPrioritaryAssigned = useMemo(
     () => isMostPrioritaryAssigned(tasks, currentEmail),
@@ -271,9 +305,20 @@ export default function CommunityProjectBoard() {
           cols.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
         }
 
+        const ownerMatch =
+          !!session?.user?.email && session.user.email === data.project.ownerEmail;
+        const initialRepoJoined = ownerMatch
+          ? true
+          : Boolean(
+              (data as any).repoJoined ??
+              (data.project as any)?.repoJoined ??
+              false
+            );
+
         setProject(data.project);
         setColumns(cols);
         setTasks(data.tasks);
+        setRepoJoined(initialRepoJoined);
       } catch (err: any) {
         console.error('[community-board] Error cargando tablero', err);
         setError(err.message || 'No se pudo cargar el proyecto de la comunidad');
@@ -283,7 +328,7 @@ export default function CommunityProjectBoard() {
     };
 
     loadBoard();
-  }, [router.isReady, id, router]);
+  }, [router.isReady, id, router, session?.user?.email]);
 
   // --------- WebSocket boardUpdated ---------
   useEffect(() => {
@@ -313,18 +358,27 @@ export default function CommunityProjectBoard() {
       setTasks(payload.tasks);
     };
 
+    const handleUserInvited = (payload: { projectId: string; userEmail?: string }) => {
+      if (payload.projectId !== project.id) return;
+      if (payload.userEmail && currentEmail && payload.userEmail !== currentEmail) return;
+      setRepoInvitationBanner(true);
+    };
+
     socket.on("community:boardUpdated", handleBoardUpdated);
+    socket.on("community:userInvitedToRepo", handleUserInvited);
 
     return () => {
       socket?.off("connect", joinRoom);
       socket?.off("community:boardUpdated", handleBoardUpdated);
+      socket?.off("community:userInvitedToRepo", handleUserInvited);
       socket?.emit("community:leave", { projectId: project.id });
     };
-  }, [project?.id]);
+  }, [project?.id, currentEmail]);
 
   // --------- Drag & drop ---------
   const handleDragStart = (taskId: string, columnId: ColumnId) => {
-    if (!canInteract) return;
+    if (!session?.user?.email) return;
+    if (!canCollaborate) return;
     if (columnId === 'done') return; // done congelado (no se arrastra)
     setDraggedTaskId(taskId);
   };
@@ -365,6 +419,8 @@ export default function CommunityProjectBoard() {
     }
 
     try {
+      setActionError(null);
+      setActionMessage(null);
       // ✅ doing -> review => abrir modal (submit-review)
       if (sourceColumn === 'doing' && targetColumn === 'review') {
         // Solo el assigned puede mandar a review
@@ -399,8 +455,10 @@ export default function CommunityProjectBoard() {
         return;
       }
 
-      // ⚠️ Mantengo tu lógica original, pero ahora canInteract incluye devs.
-      if (!canInteract) {
+      // ⚠️ Bloqueo si no tiene repo (o no ha aceptado invitación)
+      if (!canCollaborate) {
+        setActionMessage(null);
+        setActionError('Necesitas acceso al repositorio para mover tareas.');
         setDraggedTaskId(null);
         return;
       }
@@ -422,7 +480,12 @@ export default function CommunityProjectBoard() {
         );
 
         const data = await res.json().catch(() => ({} as any));
-        if (!res.ok) throw new Error(data.error || 'No se pudo asignar la tarea');
+        if (!res.ok)
+          throw new Error(
+            mapRepoError((data as any).error) ||
+              (data as any).error ||
+              'No se pudo asignar la tarea'
+          );
 
         setTasks(data.tasks as BoardTask[]);
       }
@@ -444,7 +507,11 @@ export default function CommunityProjectBoard() {
 
         const data = await res.json().catch(() => ({} as any));
         if (!res.ok)
-          throw new Error(data.error || 'No se pudo marcar la tarea como hecha');
+          throw new Error(
+            mapRepoError((data as any).error) ||
+              (data as any).error ||
+              'No se pudo marcar la tarea como hecha'
+          );
 
         setTasks(data.tasks as BoardTask[]);
       }
@@ -464,7 +531,11 @@ export default function CommunityProjectBoard() {
 
         const data = await res.json().catch(() => ({} as any));
         if (!res.ok)
-          throw new Error(data.error || 'No se pudo desasignar la tarea');
+          throw new Error(
+            mapRepoError((data as any).error) ||
+              (data as any).error ||
+              'No se pudo desasignar la tarea'
+          );
 
         setTasks(data.tasks as BoardTask[]);
       }
@@ -472,8 +543,13 @@ export default function CommunityProjectBoard() {
       // Extra opcional: permitir review -> doing (dev continúa) si backend lo soporta
       // else if (sourceColumn === 'review' && targetColumn === 'doing') { ... }
 
-    } catch (err) {
+    } catch (err: any) {
       console.error('[community-board] Error moviendo tarea', err);
+      setActionMessage(null);
+      setActionError(err?.message || 'No se pudo mover la tarea');
+      if (err?.message === 'Necesitas aceptar la invitación del repositorio para colaborar.') {
+        setRepoJoined(false);
+      }
     } finally {
       setMutatingTaskId(null);
       setDraggedTaskId(null);
@@ -636,6 +712,46 @@ export default function CommunityProjectBoard() {
     }
   };
 
+  const handleJoinRepo = async () => {
+    if (!project?.id) return;
+    try {
+      setJoiningRepo(true);
+      setRepoStatusError(null);
+      setRepoStatusMessage(null);
+
+      const res = await fetch(`${API_BASE}/community/projects/${project.id}/repo/join`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userEmail: currentEmail,
+        }),
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const message =
+          mapRepoError((data as any).error) ||
+          (data as any).message ||
+          (data as any).error ||
+          'No se pudo unir al repositorio';
+
+        if ((data as any).error === 'repo_access_required') {
+          setRepoJoined(false);
+        }
+
+        throw new Error(message);
+      }
+
+      setRepoJoined(true);
+      setRepoInvitationBanner(false);
+      setRepoStatusMessage('Acceso al repositorio confirmado.');
+    } catch (err: any) {
+      setRepoStatusError(err?.message || 'No se pudo unir al repositorio');
+    } finally {
+      setJoiningRepo(false);
+    }
+  };
+
   // --------- Render de estados especiales ---------
   if (loading || status === 'loading') {
     return (
@@ -711,6 +827,21 @@ export default function CommunityProjectBoard() {
             Los desarrolladores pueden arrastrar tareas entre columnas para colaborar.
           </p>
 
+          {repoInvitationBanner && (
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-xs text-blue-800">
+              <p className="font-semibold">Has sido invitado al repositorio.</p>
+              {project.projectRepo && (
+                <Link
+                  href={`https://github.com/${project.projectRepo}`}
+                  target="_blank"
+                  className="rounded-md bg-blue-700 px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-blue-800"
+                >
+                  Abrir repositorio
+                </Link>
+              )}
+            </div>
+          )}
+
           {!session?.user?.email && (
             <p className="mt-3 text-xs text-amber-600">
               Inicia sesión para poder interactuar con las tareas.
@@ -719,9 +850,87 @@ export default function CommunityProjectBoard() {
 
           {isOwner && (
             <p className="mt-3 text-xs text-slate-500">
-              Estás viendo tu propio proyecto. Este tablero es de solo lectura para el creador.
+              Estás viendo tu propio proyecto. Puedes aprobar o rechazar tareas en revisión y
+              gestionar el tablero sin unirte al repositorio.
             </p>
           )}
+
+          <div className="mt-4 space-y-3 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+            {project.projectRepo ? (
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <p className="text-sm font-semibold text-slate-900">Repositorio</p>
+                  <p className="text-xs text-slate-600">{project.projectRepo}</p>
+                </div>
+                <Link
+                  href={`https://github.com/${project.projectRepo}`}
+                  target="_blank"
+                  className="inline-flex items-center rounded-lg bg-slate-900 px-3 py-2 text-xs font-semibold text-white hover:bg-slate-800"
+                >
+                  Abrir en GitHub
+                </Link>
+              </div>
+            ) : (
+              <div className="flex items-start gap-2 text-amber-700">
+                <span className="text-lg">⚠️</span>
+                <div>
+                  <p className="text-sm font-semibold">Repositorio no disponible.</p>
+                  <p className="text-xs">
+                    Repositorio no disponible. El proyecto no se publicó correctamente.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {!isOwner && project.projectRepo && !repoJoined && (
+              <div className="space-y-2 rounded-xl bg-amber-50 px-4 py-3 text-xs text-amber-900">
+                <p className="font-semibold">Antes de colaborar debes unirte al repositorio.</p>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    onClick={handleJoinRepo}
+                    disabled={joiningRepo || !session?.user?.email}
+                    className="rounded-lg bg-amber-700 px-3 py-2 text-[11px] font-semibold text-white hover:bg-amber-800 disabled:opacity-60"
+                  >
+                    {joiningRepo ? 'Solicitando acceso…' : 'Unirme al repo'}
+                  </button>
+                  {project.projectRepo && (
+                    <Link
+                      href={`https://github.com/${project.projectRepo}`}
+                      target="_blank"
+                      className="rounded-lg bg-white px-3 py-2 text-[11px] font-semibold text-amber-800 ring-1 ring-amber-200 hover:bg-amber-100"
+                    >
+                      Abrir repositorio
+                    </Link>
+                  )}
+                </div>
+                {repoStatusError && <p className="text-[11px] text-red-700">{repoStatusError}</p>}
+                {repoStatusMessage && (
+                  <p className="text-[11px] text-emerald-700">{repoStatusMessage}</p>
+                )}
+              </div>
+            )}
+
+            {!isOwner && project.projectRepo && repoJoined && (
+              <div className="flex items-start gap-2 text-emerald-700">
+                <span className="text-lg">✅</span>
+                <div>
+                  <p className="text-sm font-semibold">Acceso al repositorio confirmado.</p>
+                  <p className="text-xs text-slate-700">
+                    Ya puedes mover tareas en el tablero.
+                  </p>
+                  <div className="mt-2">
+                    <Link
+                      href={`https://github.com/${project.projectRepo}`}
+                      target="_blank"
+                      className="inline-flex rounded-lg bg-emerald-700 px-3 py-2 text-[11px] font-semibold text-white hover:bg-emerald-800"
+                    >
+                      Abrir repositorio
+                    </Link>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
 
           {(actionMessage || actionError) && (
             <div
@@ -746,11 +955,12 @@ export default function CommunityProjectBoard() {
                 className="flex min-h-[320px] flex-col rounded-2xl bg-slate-50 p-4"
                 onDragOver={(e) => {
                   // Owners también interactúan para review->done/todo
-                  if (!session?.user?.email) return;
+                  if (!session?.user?.email || !canCollaborate) return;
                   e.preventDefault();
                 }}
                 onDrop={(e) => {
                   e.preventDefault();
+                  if (!canCollaborate) return;
                   handleDropOnColumn(column.id as ColumnId);
                 }}
               >
@@ -798,7 +1008,7 @@ export default function CommunityProjectBoard() {
                           draggable={
                             // ✅ devs pueden arrastrar excepto done
                             // ✅ owner también puede arrastrar desde review a done/todo (y lo usamos en handleDrop)
-                            session?.user?.email && task.columnId !== 'done'
+                            session?.user?.email && canCollaborate && task.columnId !== 'done'
                               ? true
                               : undefined
                           }
