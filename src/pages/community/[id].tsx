@@ -11,6 +11,28 @@ type TaskCategory = 'ARCHITECTURE' | 'MODEL' | 'SERVICE' | 'VIEW' | 'INFRA' | 'Q
 type TaskStatus = 'TODO' | 'IN_PROGRESS' | 'IN_REVIEW' | 'DONE' | 'REJECTED';
 type VerificationStatus = 'NOT_SUBMITTED' | 'SUBMITTED' | 'APPROVED' | 'REJECTED';
 type GithubCheckStatus = 'PENDING' | 'PASSED' | 'FAILED';
+type ChecklistStatus = 'PENDING' | 'PASSED' | 'FAILED';
+
+interface ChecklistItem {
+  key: string;
+  text: string;
+  status: ChecklistStatus;
+  details?: string | null;
+}
+
+interface RepoChecksInfo {
+  status?: GithubCheckStatus | null;
+  lastRunUrl?: string | null;
+  lastRunConclusion?: string | null;
+}
+
+interface RepoInfo {
+  provider?: string;
+  repoFullName?: string | null;
+  branch?: string | null;
+  checks?: RepoChecksInfo;
+  prNumber?: number | null;
+}
 
 interface BoardColumn {
   id: ColumnId;
@@ -32,6 +54,8 @@ interface BoardTask {
   repoFullName?: string | null;
   checkStatus?: GithubCheckStatus | null;
   lastRunUrl?: string | null;
+  checklist?: ChecklistItem[];
+  repo?: RepoInfo;
 
   status?: TaskStatus;
   verificationStatus?: VerificationStatus;
@@ -100,6 +124,89 @@ const getRepoHtmlUrl = (repo: unknown): string | null => {
   const fullName = getRepoFullName(repo);
   if (!fullName) return null;
   return `https://github.com/${fullName}`;
+};
+
+const normalizeChecklist = (raw: unknown): ChecklistItem[] => {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((item, idx) => {
+      if (!item || typeof item !== 'object') return null;
+      const it = item as any;
+      const text = toText(it.text || it.label || it.title || '');
+      const key = typeof it.key === 'string' && it.key.trim().length > 0 ? it.key : `item-${idx}`;
+      if (!text) return null;
+
+      const status: ChecklistStatus =
+        it.status === 'PASSED' || it.status === 'FAILED' ? it.status : 'PENDING';
+
+      const details = typeof it.details === 'string' ? it.details : null;
+
+      return { key, text, status, details } as ChecklistItem;
+    })
+    .filter(Boolean) as ChecklistItem[];
+};
+
+const normalizeRepo = (raw: unknown): RepoInfo | undefined => {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const repo = raw as any;
+  const checks = repo.checks || {};
+  return {
+    provider: repo.provider,
+    repoFullName: getRepoFullName(repo) || undefined,
+    branch: typeof repo.branch === 'string' ? repo.branch : undefined,
+    prNumber: typeof repo.prNumber === 'number' ? repo.prNumber : undefined,
+    checks: {
+      status: checks.status,
+      lastRunUrl: checks.lastRunUrl,
+      lastRunConclusion: checks.lastRunConclusion,
+    },
+  } as RepoInfo;
+};
+
+const mapColumnId = (raw: any): ColumnId => {
+  if (raw?.columnId === 'todo' || raw?.columnId === 'doing' || raw?.columnId === 'review' || raw?.columnId === 'done') {
+    return raw.columnId;
+  }
+
+  const status = raw?.status as TaskStatus | undefined;
+  if (status === 'IN_PROGRESS') return 'doing';
+  if (status === 'IN_REVIEW') return 'review';
+  if (status === 'DONE') return 'done';
+  return 'todo';
+};
+
+const normalizeTask = (raw: any): BoardTask => {
+  const repoInfo = normalizeRepo(raw?.repo);
+  const repoFullName = getRepoFullName(raw?.repo) || raw?.repoFullName || null;
+  const checkStatus =
+    (raw?.repo?.checks?.status as GithubCheckStatus) || (raw?.checkStatus as GithubCheckStatus) || null;
+  const lastRunUrl = raw?.repo?.checks?.lastRunUrl || raw?.lastRunUrl || null;
+
+  return {
+    id: raw?.id ?? raw?._id ?? '',
+    title: raw?.title || '',
+    description: raw?.description || '',
+    price: raw?.price ?? 0,
+    priority: raw?.priority ?? 0,
+    layer: raw?.layer || raw?.category || 'QA',
+    columnId: mapColumnId(raw),
+    assigneeEmail: raw?.assigneeEmail ?? null,
+    assigneeAvatar: raw?.assigneeAvatar ?? null,
+    repoFullName,
+    checkStatus,
+    lastRunUrl,
+    status: raw?.status,
+    verificationStatus: raw?.verificationStatus,
+    acceptanceCriteria: raw?.acceptanceCriteria,
+    verificationNotes: raw?.verificationNotes,
+    checklist: normalizeChecklist(raw?.checklist),
+    repo: repoInfo,
+  } as BoardTask;
+};
+
+const normalizeTasks = (raw: unknown): BoardTask[] => {
+  if (!Array.isArray(raw)) return [];
+  return (raw as any[]).map(normalizeTask);
 };
 
 // ✅ URL login GitHub con returnTo a esta página
@@ -348,7 +455,7 @@ export default function CommunityProjectBoard() {
 
         setProject(data.project);
         setColumns(cols);
-        setTasks(data.tasks);
+        setTasks(normalizeTasks((data as any).tasks));
         setRepoJoined(initialRepoJoined);
 
         // ✅ IMPORTANTE: tras cargar, confirma estado real (persistencia tras refresh)
@@ -396,7 +503,7 @@ export default function CommunityProjectBoard() {
 
     const handleBoardUpdated = (payload: { projectId: string; tasks: BoardTask[] }) => {
       if (payload.projectId !== project.id) return;
-      setTasks(payload.tasks);
+      setTasks(normalizeTasks(payload.tasks));
     };
 
     const handleUserInvited = (payload: { projectId: string; userEmail?: string }) => {
@@ -514,7 +621,7 @@ export default function CommunityProjectBoard() {
             mapRepoError((data as any).error) || (data as any).error || 'No se pudo asignar la tarea'
           );
 
-        setTasks(data.tasks as BoardTask[]);
+        setTasks(normalizeTasks((data as any).tasks));
       } else if (sourceColumn === 'doing' && targetColumn === 'done') {
         setMutatingTaskId(task.id);
 
@@ -532,7 +639,7 @@ export default function CommunityProjectBoard() {
               'No se pudo marcar la tarea como hecha'
           );
 
-        setTasks(data.tasks as BoardTask[]);
+        setTasks(normalizeTasks((data as any).tasks));
       } else if (sourceColumn === 'doing' && targetColumn === 'todo') {
         setMutatingTaskId(task.id);
 
@@ -548,7 +655,7 @@ export default function CommunityProjectBoard() {
             mapRepoError((data as any).error) || (data as any).error || 'No se pudo desasignar la tarea'
           );
 
-        setTasks(data.tasks as BoardTask[]);
+        setTasks(normalizeTasks((data as any).tasks));
       }
     } catch (err: any) {
       console.error('[community-board] Error moviendo tarea', err);
@@ -595,7 +702,7 @@ export default function CommunityProjectBoard() {
       const data = await res.json().catch(() => ({} as any));
       if (!res.ok) throw new Error((data as any).error || 'No se pudo enviar a revisión');
 
-      if (Array.isArray((data as any).tasks)) setTasks((data as any).tasks as BoardTask[]);
+      if (Array.isArray((data as any).tasks)) setTasks(normalizeTasks((data as any).tasks));
       closeModal();
     } catch (e: any) {
       setModalErr(e.message || 'Error');
@@ -621,7 +728,7 @@ export default function CommunityProjectBoard() {
       const data = await res.json().catch(() => ({} as any));
       if (!res.ok) throw new Error((data as any).error || 'No se pudo revisar la tarea');
 
-      if (Array.isArray((data as any).tasks)) setTasks((data as any).tasks as BoardTask[]);
+      if (Array.isArray((data as any).tasks)) setTasks(normalizeTasks((data as any).tasks));
       closeModal();
     } catch (e: any) {
       setModalErr(e.message || 'Error');
@@ -647,7 +754,7 @@ export default function CommunityProjectBoard() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error((data as any).error || 'No se pudo ejecutar la verificación');
 
-      if (Array.isArray((data as any).tasks)) setTasks((data as any).tasks as BoardTask[]);
+      if (Array.isArray((data as any).tasks)) setTasks(normalizeTasks((data as any).tasks));
       setActionMessage('Verificación solicitada.');
     } catch (err: any) {
       console.error('[github] verify error', err);
@@ -1101,8 +1208,52 @@ export default function CommunityProjectBoard() {
                                 </div>
                               )}
 
+                              <div className="space-y-1">
+                                <div className="text-[11px] font-semibold text-slate-700">Checklist</div>
+                                {task.checklist && task.checklist.length > 0 ? (
+                                  <ul className="space-y-2">
+                                    {task.checklist.map((item) => {
+                                      const status = (item.status || 'PENDING') as ChecklistStatus;
+                                      const badgeClasses =
+                                        status === 'PASSED'
+                                          ? 'bg-emerald-100 text-emerald-700'
+                                          : status === 'FAILED'
+                                            ? 'bg-red-100 text-red-700'
+                                            : 'bg-yellow-100 text-yellow-800';
+
+                                      return (
+                                        <li key={item.key} className="rounded-lg border border-slate-200 bg-white p-2">
+                                          <div className="flex items-start justify-between gap-2">
+                                            <div className="flex-1">
+                                              <div className="text-[11px] font-semibold text-slate-800">{item.text}</div>
+                                              {item.details && (
+                                                <div className="mt-1 text-[10px] text-slate-600 whitespace-pre-wrap">{item.details}</div>
+                                              )}
+                                            </div>
+                                            <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${badgeClasses}`}>
+                                              {status}
+                                            </span>
+                                          </div>
+                                        </li>
+                                      );
+                                    })}
+                                  </ul>
+                                ) : (
+                                  <p className="text-[11px] text-slate-500">Checklist pendiente de generación.</p>
+                                )}
+                              </div>
+
                               {task.checkStatus === 'FAILED' && (
                                 <p className="text-[11px] text-red-600">Corrige y vuelve a enviar.</p>
+                              )}
+
+                              {task.lastRunUrl && (
+                                <div className="text-[11px]">
+                                  Última ejecución:{' '}
+                                  <Link href={task.lastRunUrl} target="_blank" className="text-indigo-600 underline">
+                                    Ver reporte
+                                  </Link>
+                                </div>
                               )}
                             </div>
                           )}
