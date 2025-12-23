@@ -90,6 +90,44 @@ const getTaskHours = (task: GeneratedTask): number => {
   return rawPrice / rate;
 };
 
+// ============================
+// ✅ Draft persistence (Option A)
+// ============================
+const DRAFT_KEY = 'generator:draft:v1';
+
+type GeneratorDraft = {
+  projectTitle: string;
+  projectDescription: string;
+  ownerEmail: string;
+  estimation: ProjectEstimation | null;
+  ts: number;
+};
+
+const saveDraft = (draft: GeneratorDraft) => {
+  if (typeof window === 'undefined') return;
+  try {
+    sessionStorage.setItem(DRAFT_KEY, JSON.stringify(draft));
+  } catch {}
+};
+
+const loadDraft = (): GeneratorDraft | null => {
+  if (typeof window === 'undefined') return null;
+  const raw = sessionStorage.getItem(DRAFT_KEY);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+};
+
+const clearDraft = () => {
+  if (typeof window === 'undefined') return;
+  try {
+    sessionStorage.removeItem(DRAFT_KEY);
+  } catch {}
+};
+
 export default function GeneratorPage() {
   const router = useRouter();
   const { data: session } = useSession();
@@ -104,12 +142,125 @@ export default function GeneratorPage() {
 
   const [publishing, setPublishing] = useState(false);
   const [publishError, setPublishError] = useState<string | null>(null);
+  const [githubConnected, setGithubConnected] = useState(false);
+  const [githubLoading, setGithubLoading] = useState(false);
+  const [githubError, setGithubError] = useState<string | null>(null);
+
+  const githubStatusEmail = useMemo(
+    () => ownerEmail || session?.user?.email || null,
+    [ownerEmail, session?.user?.email]
+  );
 
   useEffect(() => {
     if (session?.user?.email) {
       setOwnerEmail(session.user.email);
     }
   }, [session?.user?.email]);
+
+  // ✅ Restore draft once on mount (so OAuth refresh doesn't lose data)
+  useEffect(() => {
+    if (!router.isReady) return;
+
+    const draft = loadDraft();
+    if (!draft) return;
+
+    const isEmpty =
+      (!projectTitle || projectTitle.trim() === '') &&
+      (!projectDescription || projectDescription.trim() === '') &&
+      (!ownerEmail || ownerEmail.trim() === '') &&
+      !estimation;
+
+    // Solo restaura si la pantalla está "vacía", para no pisar al usuario
+    if (isEmpty) {
+      setProjectTitle(draft.projectTitle || '');
+      setProjectDescription(draft.projectDescription || '');
+      setOwnerEmail(draft.ownerEmail || session?.user?.email || '');
+      setEstimation(draft.estimation || null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [router.isReady]);
+
+  // ✅ Auto-save draft when user types / estimation changes
+  useEffect(() => {
+    // evita guardar borradores completamente vacíos
+    const hasSomething =
+      (projectTitle && projectTitle.trim() !== '') ||
+      (projectDescription && projectDescription.trim() !== '') ||
+      (ownerEmail && ownerEmail.trim() !== '') ||
+      !!estimation;
+
+    if (!hasSomething) return;
+
+    saveDraft({
+      projectTitle,
+      projectDescription,
+      ownerEmail,
+      estimation,
+      ts: Date.now(),
+    });
+  }, [projectTitle, projectDescription, ownerEmail, estimation]);
+
+  const fetchGithubStatus = async () => {
+    if (!githubStatusEmail) {
+      setGithubConnected(false);
+      setGithubError(null);
+      return;
+    }
+
+    try {
+      setGithubLoading(true);
+      setGithubError(null);
+
+      const res = await fetch(
+        `${API_BASE}/integrations/github/status?userEmail=${encodeURIComponent(
+          githubStatusEmail
+        )}`
+      );
+
+      if (!res.ok) throw new Error('No se pudo comprobar la integración de GitHub.');
+
+      const data = await res.json().catch(() => ({}));
+      const statusValue = Boolean(
+        (data as any).connected ?? (data as any).isConnected ?? (data as any).status
+      );
+      setGithubConnected(statusValue);
+    } catch (err: any) {
+      console.error('[generator] Error comprobando GitHub', err);
+      setGithubConnected(false);
+      setGithubError(err?.message || 'No se pudo comprobar GitHub.');
+    } finally {
+      setGithubLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchGithubStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [githubStatusEmail]);
+
+  useEffect(() => {
+    if (!router.isReady) return;
+
+    const github = router.query.github;
+    if (github === 'connected' || github === 'error') {
+      fetchGithubStatus();
+      const nextQuery = { ...router.query };
+      delete (nextQuery as any).github;
+      router.replace({ pathname: router.pathname, query: nextQuery }, undefined, {
+        shallow: true,
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [router.isReady, router.query.github]);
+
+  const buildGithubLoginUrl = () => {
+    if (!githubStatusEmail) return '/integrations/github/login';
+    const params = new URLSearchParams({
+      userEmail: githubStatusEmail,
+      returnTo: '/tools/generator',
+    });
+    return `/integrations/github/login?${params.toString()}`;
+  };
 
   // ✅ Total horas: usa estimation.totalHours si es > 0,
   // si no, las recalcula a partir de las tareas.
@@ -156,7 +307,6 @@ export default function GeneratorPage() {
   // ✅ Total cliente: derivado (robusto)
   const grandTotalClientCost = useMemo(() => {
     const backend = safeNumber(estimation?.grandTotalClientCost);
-    // Si backend viene bien y es >0, puedes usarlo; si no, recomputa
     if (backend > 0) return backend;
     return +(totalTasksPrice + platformFeeAmount).toFixed(2);
   }, [estimation?.grandTotalClientCost, totalTasksPrice, platformFeeAmount]);
@@ -180,11 +330,7 @@ export default function GeneratorPage() {
 
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        console.error(
-          '[generator] Error HTTP generando tareas',
-          res.status,
-          data
-        );
+        console.error('[generator] Error HTTP generando tareas', res.status, data);
 
         if (res.status === 402 && data?.error === 'subscription_required') {
           setError(
@@ -194,14 +340,11 @@ export default function GeneratorPage() {
           return;
         }
 
-        throw new Error(
-          data.error || 'No se pudo generar el troceado de tareas'
-        );
+        throw new Error(data.error || 'No se pudo generar el troceado de tareas');
       }
 
       const data = (await res.json()) as { project: ProjectEstimation };
 
-      // ✅ Normalización defensiva mínima (por si el backend manda percent=0 o totales vacíos)
       const proj = data.project;
       const fixed: ProjectEstimation = {
         ...proj,
@@ -224,6 +367,11 @@ export default function GeneratorPage() {
   const handlePublishToCommunity = async () => {
     if (!estimation) return;
 
+    if (!githubConnected) {
+      setPublishError('Para publicar en la comunidad debes conectar tu cuenta de GitHub.');
+      return;
+    }
+
     try {
       setPublishing(true);
       setPublishError(null);
@@ -244,7 +392,6 @@ export default function GeneratorPage() {
         return;
       }
 
-      // ✅ payload coherente (incluye totales recalculados)
       const estimationPayload = {
         ...estimation,
         ownerEmail: ownerEmailResolved,
@@ -271,8 +418,32 @@ export default function GeneratorPage() {
 
       if (!res.ok) {
         console.error('[generator] Error HTTP publicando proyecto', res.status, data);
-        throw new Error(data.error || 'No se pudo publicar el proyecto en la comunidad');
+        const code = data?.error;
+
+        if (code === 'github_not_connected_owner') {
+          setGithubConnected(false);
+          throw new Error(
+            'Debes conectar tu GitHub para que podamos crear el repositorio automáticamente.'
+          );
+        }
+
+        if (code === 'github_permissions_missing') {
+          throw new Error(
+            'Faltan permisos en tu cuenta de GitHub para crear el repositorio automático. Revisa la integración e inténtalo de nuevo.'
+          );
+        }
+
+        if (code === 'repo_not_created') {
+          throw new Error(
+            'No pudimos crear el repositorio automático. Revisa tu conexión de GitHub e inténtalo de nuevo.'
+          );
+        }
+
+        throw new Error(code || 'No se pudo publicar el proyecto en la comunidad');
       }
+
+      // ✅ Ya está persistido en backend -> podemos limpiar borrador
+      clearDraft();
 
       router.push(data.publicUrl || `/community/${data.id}`);
     } catch (err: any) {
@@ -370,9 +541,7 @@ export default function GeneratorPage() {
               <button
                 type="button"
                 onClick={handleGenerateTasks}
-                disabled={
-                  loading || !projectTitle || !projectDescription || !ownerEmail
-                }
+                disabled={loading || !projectTitle || !projectDescription || !ownerEmail}
                 className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-60"
               >
                 {loading
@@ -474,6 +643,65 @@ export default function GeneratorPage() {
               <span className="font-semibold">{formatPrice(grandTotalClientCost)}</span>
             </p>
 
+            <div className="mt-6 space-y-3 rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm">
+              {!githubConnected ? (
+                <div className="flex flex-col gap-2">
+                  <div className="flex items-center gap-2 text-amber-700">
+                    <span className="text-lg">⚠️</span>
+                    <div>
+                      <p className="font-semibold">
+                        Para publicar este proyecto debes conectar tu cuenta de GitHub.
+                      </p>
+                      <p className="text-slate-600">
+                        Crearemos un repositorio privado automáticamente al publicar.
+                      </p>
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (!githubStatusEmail) return;
+
+                      // ✅ guarda el estado del generador antes del redirect OAuth
+                      saveDraft({
+                        projectTitle,
+                        projectDescription,
+                        ownerEmail,
+                        estimation,
+                        ts: Date.now(),
+                      });
+
+                      window.location.href =
+                        `${API_BASE}/integrations/github/login` +
+                        `?userEmail=${encodeURIComponent(githubStatusEmail)}` +
+                        `&returnTo=${encodeURIComponent('/tools/generator')}`;
+                    }}
+                    disabled={!githubStatusEmail || githubLoading}
+                    className="inline-flex items-center justify-center rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-60"
+                  >
+                    {githubLoading ? 'Comprobando GitHub…' : 'Conectar GitHub'}
+                  </button>
+
+                  {githubError && (
+                    <p className="text-xs text-red-600">
+                      {githubError} {githubStatusEmail ? '' : 'Añade un email para continuar.'}
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <div className="flex items-start gap-2 text-emerald-700">
+                  <span className="text-lg">✅</span>
+                  <div>
+                    <p className="font-semibold">GitHub conectado</p>
+                    <p className="text-slate-700">
+                      Se creará un repositorio privado automáticamente al publicar.
+                    </p>
+                  </div>
+                </div>
+              )}
+            </div>
+
             {publishError && (
               <div className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">
                 {publishError}
@@ -484,7 +712,7 @@ export default function GeneratorPage() {
               <button
                 type="button"
                 onClick={handlePublishToCommunity}
-                disabled={publishing}
+                disabled={publishing || !githubConnected || githubLoading}
                 className="w-full rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-60 md:w-auto"
               >
                 {publishing
@@ -492,6 +720,12 @@ export default function GeneratorPage() {
                   : 'Publicar este proyecto en la comunidad'}
               </button>
             </div>
+
+            {!githubConnected && (
+              <p className="mt-2 text-xs text-amber-700">
+                Conecta GitHub para habilitar la publicación.
+              </p>
+            )}
           </section>
         )}
       </div>
