@@ -90,6 +90,44 @@ const getTaskHours = (task: GeneratedTask): number => {
   return rawPrice / rate;
 };
 
+// ============================
+// ✅ Draft persistence (Option A)
+// ============================
+const DRAFT_KEY = 'generator:draft:v1';
+
+type GeneratorDraft = {
+  projectTitle: string;
+  projectDescription: string;
+  ownerEmail: string;
+  estimation: ProjectEstimation | null;
+  ts: number;
+};
+
+const saveDraft = (draft: GeneratorDraft) => {
+  if (typeof window === 'undefined') return;
+  try {
+    sessionStorage.setItem(DRAFT_KEY, JSON.stringify(draft));
+  } catch {}
+};
+
+const loadDraft = (): GeneratorDraft | null => {
+  if (typeof window === 'undefined') return null;
+  const raw = sessionStorage.getItem(DRAFT_KEY);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+};
+
+const clearDraft = () => {
+  if (typeof window === 'undefined') return;
+  try {
+    sessionStorage.removeItem(DRAFT_KEY);
+  } catch {}
+};
+
 export default function GeneratorPage() {
   const router = useRouter();
   const { data: session } = useSession();
@@ -119,6 +157,49 @@ export default function GeneratorPage() {
     }
   }, [session?.user?.email]);
 
+  // ✅ Restore draft once on mount (so OAuth refresh doesn't lose data)
+  useEffect(() => {
+    if (!router.isReady) return;
+
+    const draft = loadDraft();
+    if (!draft) return;
+
+    const isEmpty =
+      (!projectTitle || projectTitle.trim() === '') &&
+      (!projectDescription || projectDescription.trim() === '') &&
+      (!ownerEmail || ownerEmail.trim() === '') &&
+      !estimation;
+
+    // Solo restaura si la pantalla está "vacía", para no pisar al usuario
+    if (isEmpty) {
+      setProjectTitle(draft.projectTitle || '');
+      setProjectDescription(draft.projectDescription || '');
+      setOwnerEmail(draft.ownerEmail || session?.user?.email || '');
+      setEstimation(draft.estimation || null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [router.isReady]);
+
+  // ✅ Auto-save draft when user types / estimation changes
+  useEffect(() => {
+    // evita guardar borradores completamente vacíos
+    const hasSomething =
+      (projectTitle && projectTitle.trim() !== '') ||
+      (projectDescription && projectDescription.trim() !== '') ||
+      (ownerEmail && ownerEmail.trim() !== '') ||
+      !!estimation;
+
+    if (!hasSomething) return;
+
+    saveDraft({
+      projectTitle,
+      projectDescription,
+      ownerEmail,
+      estimation,
+      ts: Date.now(),
+    });
+  }, [projectTitle, projectDescription, ownerEmail, estimation]);
+
   const fetchGithubStatus = async () => {
     if (!githubStatusEmail) {
       setGithubConnected(false);
@@ -131,7 +212,9 @@ export default function GeneratorPage() {
       setGithubError(null);
 
       const res = await fetch(
-        `${API_BASE}/integrations/github/status?userEmail=${encodeURIComponent(githubStatusEmail)}`
+        `${API_BASE}/integrations/github/status?userEmail=${encodeURIComponent(
+          githubStatusEmail
+        )}`
       );
 
       if (!res.ok) throw new Error('No se pudo comprobar la integración de GitHub.');
@@ -224,7 +307,6 @@ export default function GeneratorPage() {
   // ✅ Total cliente: derivado (robusto)
   const grandTotalClientCost = useMemo(() => {
     const backend = safeNumber(estimation?.grandTotalClientCost);
-    // Si backend viene bien y es >0, puedes usarlo; si no, recomputa
     if (backend > 0) return backend;
     return +(totalTasksPrice + platformFeeAmount).toFixed(2);
   }, [estimation?.grandTotalClientCost, totalTasksPrice, platformFeeAmount]);
@@ -248,11 +330,7 @@ export default function GeneratorPage() {
 
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        console.error(
-          '[generator] Error HTTP generando tareas',
-          res.status,
-          data
-        );
+        console.error('[generator] Error HTTP generando tareas', res.status, data);
 
         if (res.status === 402 && data?.error === 'subscription_required') {
           setError(
@@ -262,14 +340,11 @@ export default function GeneratorPage() {
           return;
         }
 
-        throw new Error(
-          data.error || 'No se pudo generar el troceado de tareas'
-        );
+        throw new Error(data.error || 'No se pudo generar el troceado de tareas');
       }
 
       const data = (await res.json()) as { project: ProjectEstimation };
 
-      // ✅ Normalización defensiva mínima (por si el backend manda percent=0 o totales vacíos)
       const proj = data.project;
       const fixed: ProjectEstimation = {
         ...proj,
@@ -317,7 +392,6 @@ export default function GeneratorPage() {
         return;
       }
 
-      // ✅ payload coherente (incluye totales recalculados)
       const estimationPayload = {
         ...estimation,
         ownerEmail: ownerEmailResolved,
@@ -345,6 +419,7 @@ export default function GeneratorPage() {
       if (!res.ok) {
         console.error('[generator] Error HTTP publicando proyecto', res.status, data);
         const code = data?.error;
+
         if (code === 'github_not_connected_owner') {
           setGithubConnected(false);
           throw new Error(
@@ -366,6 +441,9 @@ export default function GeneratorPage() {
 
         throw new Error(code || 'No se pudo publicar el proyecto en la comunidad');
       }
+
+      // ✅ Ya está persistido en backend -> podemos limpiar borrador
+      clearDraft();
 
       router.push(data.publicUrl || `/community/${data.id}`);
     } catch (err: any) {
@@ -463,9 +541,7 @@ export default function GeneratorPage() {
               <button
                 type="button"
                 onClick={handleGenerateTasks}
-                disabled={
-                  loading || !projectTitle || !projectDescription || !ownerEmail
-                }
+                disabled={loading || !projectTitle || !projectDescription || !ownerEmail}
                 className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-60"
               >
                 {loading
@@ -581,17 +657,32 @@ export default function GeneratorPage() {
                       </p>
                     </div>
                   </div>
+
                   <button
                     type="button"
                     onClick={() => {
                       if (!githubStatusEmail) return;
-                      window.location.href = buildGithubLoginUrl();
+
+                      // ✅ guarda el estado del generador antes del redirect OAuth
+                      saveDraft({
+                        projectTitle,
+                        projectDescription,
+                        ownerEmail,
+                        estimation,
+                        ts: Date.now(),
+                      });
+
+                      window.location.href =
+                        `${API_BASE}/integrations/github/login` +
+                        `?userEmail=${encodeURIComponent(githubStatusEmail)}` +
+                        `&returnTo=${encodeURIComponent('/tools/generator')}`;
                     }}
                     disabled={!githubStatusEmail || githubLoading}
                     className="inline-flex items-center justify-center rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-60"
                   >
                     {githubLoading ? 'Comprobando GitHub…' : 'Conectar GitHub'}
                   </button>
+
                   {githubError && (
                     <p className="text-xs text-red-600">
                       {githubError} {githubStatusEmail ? '' : 'Añade un email para continuar.'}
@@ -629,6 +720,7 @@ export default function GeneratorPage() {
                   : 'Publicar este proyecto en la comunidad'}
               </button>
             </div>
+
             {!githubConnected && (
               <p className="mt-2 text-xs text-amber-700">
                 Conecta GitHub para habilitar la publicación.
