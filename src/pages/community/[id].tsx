@@ -234,6 +234,12 @@ const normalizeTasks = (raw: unknown): BoardTask[] => {
   return (raw as any[]).map(normalizeTask);
 };
 
+const getChecklistStatusVisuals = (status: ChecklistStatus) => {
+  if (status === 'PASSED') return { icon: '✅', className: 'text-emerald-600' };
+  if (status === 'FAILED') return { icon: '❌', className: 'text-red-600' };
+  return { icon: '⏳', className: 'text-slate-400' };
+};
+
 // ✅ NUEVO: normalizar technicalChecklist venga donde venga (se mantiene, aunque ya no se renderiza en cabecera)
 const normalizeTechnicalChecklist = (raw: unknown): TechnicalChecklistGroup[] => {
   if (!Array.isArray(raw)) return [];
@@ -665,6 +671,57 @@ export default function CommunityProjectBoard() {
     [tasks, currentEmail]
   );
 
+  const renderChecklist = (task: BoardTask, variant: 'card' | 'panel' = 'card') => {
+    const checklist = Array.isArray(task.checklist) ? task.checklist : [];
+    const showEmptyMessage = checklist.length === 0 && (task.columnId === 'doing' || task.columnId === 'review');
+
+    const wrapperBase =
+      variant === 'card'
+        ? 'mt-3 space-y-2 rounded-lg border border-slate-200 bg-slate-50 p-3 text-[11px] text-slate-700'
+        : 'space-y-2 rounded-lg border border-slate-200 bg-white/70 p-3 text-[11px] text-slate-700';
+
+    if (!checklist.length && !showEmptyMessage) return null;
+
+    return (
+      <div className={wrapperBase}>
+        <div className="font-semibold text-slate-800">Checklist</div>
+
+        {showEmptyMessage ? (
+          <p className="text-[11px] text-slate-500">Checklist pendiente de generación</p>
+        ) : (
+          <ul className="space-y-2">
+            {checklist.map((item) => {
+              const status = (item.status || 'PENDING') as ChecklistStatus;
+              const visuals = getChecklistStatusVisuals(status);
+              const isPassed = status === 'PASSED';
+
+              return (
+                <li
+                  key={item.key}
+                  className="flex items-start gap-2 rounded-lg bg-white p-2 ring-1 ring-slate-200"
+                >
+                  <input type="checkbox" checked={isPassed} readOnly className="mt-0.5 h-4 w-4" />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-start justify-between gap-2">
+                      <span className="text-[11px] font-semibold text-slate-800">{item.text}</span>
+                      <span className={`text-[12px] ${visuals.className}`} title={status}>
+                        {visuals.icon}
+                      </span>
+                    </div>
+
+                    {item.details && (
+                      <div className="mt-1 whitespace-pre-wrap text-[10px] text-slate-600">{item.details}</div>
+                    )}
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
+    );
+  };
+
   // ✅ Refrescar estado real del repo (para que al refrescar NO vuelva a pedir "Unirme")
   const refreshRepoStatus = async (projectId: string) => {
     if (!currentEmail) return;
@@ -867,6 +924,11 @@ export default function CommunityProjectBoard() {
       }
 
       if (sourceColumn === 'review' && targetColumn === 'done') {
+        if (task.checkStatus === 'FAILED') {
+          setActionError('La verificación ha fallado. Corrige la tarea antes de completarla.');
+          setDraggedTaskId(null);
+          return;
+        }
         if (!isOwner || !currentEmail) {
           setDraggedTaskId(null);
           return;
@@ -1285,64 +1347,17 @@ export default function CommunityProjectBoard() {
                             <span className="font-semibold text-slate-900">{formatPrice(task.price)}</span>
                           </div>
 
-                          {/* ✅ Checklist INLINE SIEMPRE (checkboxes) */}
-                          {task.checklist && task.checklist.length > 0 && (
-                            <div className="mt-3 space-y-2 rounded-lg border border-slate-200 bg-slate-50 p-3 text-[11px] text-slate-700">
-                              <div className="font-semibold text-slate-800">Checklist</div>
-
-                              <ul className="space-y-2">
-                                {task.checklist.map((item) => {
-                                  const status = (item.status || 'PENDING') as ChecklistStatus;
-
-                                  // Solo mostramos ✅/❌ cuando está en review o done.
-                                  // En todo/doing mostramos ⏳ y el checkbox queda desmarcado (readOnly).
-                                  const showResultIcon = task.columnId === 'review' || task.columnId === 'done';
-                                  const isPassed = status === 'PASSED';
-                                  const isFailed = status === 'FAILED';
-
-                                  const icon = !showResultIcon ? '⏳' : isPassed ? '✅' : isFailed ? '❌' : '⏳';
-                                  const iconClass = !showResultIcon
-                                    ? 'text-slate-400'
-                                    : isPassed
-                                      ? 'text-emerald-600'
-                                      : isFailed
-                                        ? 'text-red-600'
-                                        : 'text-yellow-700';
-
-                                  return (
-                                    <li
-                                      key={item.key}
-                                      className="flex items-start gap-2 rounded-lg bg-white p-2 ring-1 ring-slate-200"
-                                    >
-                                      <input
-                                        type="checkbox"
-                                        checked={showResultIcon ? isPassed : false}
-                                        readOnly
-                                        className="mt-0.5 h-4 w-4"
-                                      />
-                                      <div className="min-w-0 flex-1">
-                                        <div className="flex items-start justify-between gap-2">
-                                          <span className="text-[11px] font-semibold text-slate-800">{item.text}</span>
-                                          <span className={`text-[12px] ${iconClass}`} title={status}>
-                                            {icon}
-                                          </span>
-                                        </div>
-
-                                        {item.details && (
-                                          <div className="mt-1 whitespace-pre-wrap text-[10px] text-slate-600">
-                                            {item.details}
-                                          </div>
-                                        )}
-                                      </div>
-                                    </li>
-                                  );
-                                })}
-                              </ul>
-                            </div>
-                          )}
+                          {task.columnId !== 'review' && renderChecklist(task, 'card')}
 
                           {showAssignmentMessage && (
-                            <p className="mt-2 text-[11px] text-emerald-600">Esta tarea está asignada a ti.</p>
+                            <div className="mt-2 space-y-1 text-[11px] text-emerald-600">
+                              <p>Esta tarea está asignada a ti.</p>
+                              {task.repo?.branch && typeof task.repo.branch === 'string' && (
+                                <p className="text-[10px] text-slate-600">
+                                  Spec creado en rama: <span className="font-semibold text-slate-800">{task.repo.branch}</span>
+                                </p>
+                              )}
+                            </div>
                           )}
 
                           {canShowGithubSection && (
@@ -1392,7 +1407,7 @@ export default function CommunityProjectBoard() {
                           )}
 
                           {showVerificationPanel && (
-                            <div className="mt-3 space-y-2 rounded-lg border border-slate-200 bg-slate-50 p-3 text-[11px] text-slate-700">
+                            <div className="mt-3 space-y-3 rounded-lg border border-slate-200 bg-slate-50 p-3 text-[11px] text-slate-700">
                               <div className="flex items-center justify-between text-[12px] font-semibold text-slate-800">
                                 <span>Verificación</span>
                                 {(() => {
@@ -1411,6 +1426,8 @@ export default function CommunityProjectBoard() {
                                 })()}
                               </div>
 
+                              {renderChecklist(task, 'panel')}
+
                               {canRunVerification && (
                                 <div className="flex flex-wrap items-center gap-2">
                                   <button
@@ -1423,11 +1440,9 @@ export default function CommunityProjectBoard() {
                                 </div>
                               )}
 
-                              {/* ✅ Mensaje en review (sin checklist duplicada aquí) */}
                               {task.checkStatus === 'FAILED' ? (
-                                <p className="text-[11px] text-red-700">
-                                  ❌ Han fallado tests. Esta tarea debe corregirse y volverá a <b>DOING</b> hasta pasar
-                                  todos.
+                                <p className="text-[11px] font-semibold text-red-700">
+                                  ❌ Falló la verificación. Volvió a <b>DOING</b> hasta que todos los checks pasen.
                                 </p>
                               ) : (
                                 <p className="text-[11px] text-slate-600">
