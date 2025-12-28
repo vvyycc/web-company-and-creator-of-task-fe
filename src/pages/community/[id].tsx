@@ -237,7 +237,7 @@ const normalizeTasks = (raw: unknown): BoardTask[] => {
 const getChecklistStatusVisuals = (status: ChecklistStatus) => {
   if (status === 'PASSED') return { icon: '✅', className: 'text-emerald-600' };
   if (status === 'FAILED') return { icon: '❌', className: 'text-red-600' };
-  return { icon: '⏳', className: 'text-slate-400' };
+  return { icon: '⏳', className: 'text-slate-500' };
 };
 
 // ✅ NUEVO: normalizar technicalChecklist venga donde venga (se mantiene, aunque ya no se renderiza en cabecera)
@@ -694,23 +694,38 @@ export default function CommunityProjectBoard() {
               const status = (item.status || 'PENDING') as ChecklistStatus;
               const visuals = getChecklistStatusVisuals(status);
               const isPassed = status === 'PASSED';
+              const isFailed = status === 'FAILED';
+              const checkboxAccent =
+                status === 'PASSED' ? 'accent-emerald-600' : status === 'FAILED' ? 'accent-red-600' : 'accent-slate-400';
 
               return (
                 <li
                   key={item.key}
                   className="flex items-start gap-2 rounded-lg bg-white p-2 ring-1 ring-slate-200"
                 >
-                  <input type="checkbox" checked={isPassed} readOnly className="mt-0.5 h-4 w-4" />
+                  <input
+                    type="checkbox"
+                    checked={isPassed}
+                    readOnly
+                    disabled
+                    className={`mt-0.5 h-4 w-4 cursor-not-allowed ${checkboxAccent}`}
+                    aria-label={`Checklist ${status.toLowerCase()}`}
+                  />
                   <div className="min-w-0 flex-1">
                     <div className="flex items-start justify-between gap-2">
                       <span className="text-[11px] font-semibold text-slate-800">{item.text}</span>
-                      <span className={`text-[12px] ${visuals.className}`} title={status}>
-                        {visuals.icon}
+                      <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold ${visuals.className}`} title={status}>
+                        <span>{visuals.icon}</span>
+                        <span className="uppercase tracking-wide">{status}</span>
                       </span>
                     </div>
 
                     {item.details && (
-                      <div className="mt-1 whitespace-pre-wrap text-[10px] text-slate-600">{item.details}</div>
+                      <div
+                        className={`mt-1 whitespace-pre-wrap text-[10px] ${isFailed ? 'text-red-700' : 'text-slate-600'}`}
+                      >
+                        {item.details}
+                      </div>
                     )}
                   </div>
                 </li>
@@ -1408,23 +1423,24 @@ export default function CommunityProjectBoard() {
 
                           {showVerificationPanel && (
                             <div className="mt-3 space-y-3 rounded-lg border border-slate-200 bg-slate-50 p-3 text-[11px] text-slate-700">
-                              <div className="flex items-center justify-between text-[12px] font-semibold text-slate-800">
-                                <span>Verificación</span>
-                                {(() => {
-                                  const check = (task.checkStatus || 'PENDING') as GithubCheckStatus;
-                                  const badgeClasses =
-                                    check === 'PASSED'
-                                      ? 'bg-emerald-100 text-emerald-700'
-                                      : check === 'FAILED'
-                                        ? 'bg-red-100 text-red-700'
-                                        : 'bg-yellow-100 text-yellow-800';
-                                  return (
+                              {(() => {
+                                const check = (task.checkStatus || 'PENDING') as GithubCheckStatus;
+                                const badgeClasses =
+                                  check === 'PASSED'
+                                    ? 'bg-emerald-100 text-emerald-700'
+                                    : check === 'FAILED'
+                                      ? 'bg-red-100 text-red-700'
+                                      : 'bg-yellow-100 text-yellow-800';
+
+                                return (
+                                  <div className="flex items-center justify-between text-[12px] font-semibold text-slate-800">
+                                    <span>Verificación</span>
                                     <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${badgeClasses}`}>
                                       {check}
                                     </span>
-                                  );
-                                })()}
-                              </div>
+                                  </div>
+                                );
+                              })()}
 
                               {renderChecklist(task, 'panel')}
 
@@ -1440,14 +1456,20 @@ export default function CommunityProjectBoard() {
                                 </div>
                               )}
 
-                              {task.checkStatus === 'FAILED' ? (
+                              {task.checkStatus === 'FAILED' && (
                                 <p className="text-[11px] font-semibold text-red-700">
-                                  ❌ Falló la verificación. Volvió a <b>DOING</b> hasta que todos los checks pasen.
+                                  Falló verificación: vuelve a <b>DOING</b> automáticamente
                                 </p>
-                              ) : (
-                                <p className="text-[11px] text-slate-600">
-                                  Cuando todos los checks estén ✅, la tarea pasará automáticamente a <b>DONE</b>.
+                              )}
+
+                              {task.checkStatus === 'PASSED' && (
+                                <p className="text-[11px] font-semibold text-emerald-700">
+                                  Verificación OK: pasa a <b>DONE</b>
                                 </p>
+                              )}
+
+                              {(!task.checkStatus || task.checkStatus === 'PENDING') && (
+                                <p className="text-[11px] text-slate-600">Verificación pendiente de ejecución.</p>
                               )}
 
                               {task.lastRunUrl && (
