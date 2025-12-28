@@ -4,18 +4,11 @@ import { useSession } from 'next-auth/react';
 import { useRouter } from 'next/router';
 import Link from 'next/link';
 
-const API_BASE =
-  process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:4000';
+const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:4000';
 
 type TaskComplexity = 'SIMPLE' | 'MEDIUM' | 'HIGH';
 
-type TaskCategory =
-  | 'ARCHITECTURE'
-  | 'MODEL'
-  | 'SERVICE'
-  | 'VIEW'
-  | 'INFRA'
-  | 'QA';
+type TaskCategory = 'ARCHITECTURE' | 'MODEL' | 'SERVICE' | 'VIEW' | 'INFRA' | 'QA';
 
 type ColumnId = 'todo' | 'doing' | 'done';
 
@@ -128,6 +121,30 @@ const clearDraft = () => {
   } catch {}
 };
 
+// ============================
+// ✅ OAuth popup helper (evita navegar a :4000)
+// ============================
+function openCenteredPopup(url: string) {
+  const w = 600;
+  const h = 720;
+  const dualScreenLeft = (window as any).screenLeft ?? window.screenX ?? 0;
+  const dualScreenTop = (window as any).screenTop ?? window.screenY ?? 0;
+  const width = window.innerWidth ?? document.documentElement.clientWidth ?? screen.width;
+  const height = window.innerHeight ?? document.documentElement.clientHeight ?? screen.height;
+
+  const left = width / 2 - w / 2 + dualScreenLeft;
+  const top = height / 2 - h / 2 + dualScreenTop;
+
+  const popup = window.open(
+    url,
+    'github_oauth',
+    `scrollbars=yes,width=${w},height=${h},top=${top},left=${left}`
+  );
+
+  if (popup && popup.focus) popup.focus();
+  return popup;
+}
+
 export default function GeneratorPage() {
   const router = useRouter();
   const { data: session } = useSession();
@@ -170,7 +187,6 @@ export default function GeneratorPage() {
       (!ownerEmail || ownerEmail.trim() === '') &&
       !estimation;
 
-    // Solo restaura si la pantalla está "vacía", para no pisar al usuario
     if (isEmpty) {
       setProjectTitle(draft.projectTitle || '');
       setProjectDescription(draft.projectDescription || '');
@@ -182,7 +198,6 @@ export default function GeneratorPage() {
 
   // ✅ Auto-save draft when user types / estimation changes
   useEffect(() => {
-    // evita guardar borradores completamente vacíos
     const hasSomething =
       (projectTitle && projectTitle.trim() !== '') ||
       (projectDescription && projectDescription.trim() !== '') ||
@@ -212,9 +227,7 @@ export default function GeneratorPage() {
       setGithubError(null);
 
       const res = await fetch(
-        `${API_BASE}/integrations/github/status?userEmail=${encodeURIComponent(
-          githubStatusEmail
-        )}`
+        `${API_BASE}/integrations/github/status?userEmail=${encodeURIComponent(githubStatusEmail)}`
       );
 
       if (!res.ok) throw new Error('No se pudo comprobar la integración de GitHub.');
@@ -238,6 +251,7 @@ export default function GeneratorPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [githubStatusEmail]);
 
+  // ✅ Por si tu backend hace redirect al FE con ?github=connected|error
   useEffect(() => {
     if (!router.isReady) return;
 
@@ -246,6 +260,9 @@ export default function GeneratorPage() {
       fetchGithubStatus();
       const nextQuery = { ...router.query };
       delete (nextQuery as any).github;
+      delete (nextQuery as any).githubLogin;
+      delete (nextQuery as any).reason;
+
       router.replace({ pathname: router.pathname, query: nextQuery }, undefined, {
         shallow: true,
       });
@@ -253,17 +270,43 @@ export default function GeneratorPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [router.isReady, router.query.github]);
 
-  const buildGithubLoginUrl = () => {
-    if (!githubStatusEmail) return '/integrations/github/login';
-    const params = new URLSearchParams({
-      userEmail: githubStatusEmail,
-      returnTo: '/tools/generator',
+  // ✅ Conectar GitHub sin abandonar el frontend (:3000)
+  const connectGithubWithPopup = () => {
+    if (!githubStatusEmail) return;
+
+    // guarda draft antes de OAuth
+    saveDraft({
+      projectTitle,
+      projectDescription,
+      ownerEmail,
+      estimation,
+      ts: Date.now(),
     });
-    return `/integrations/github/login?${params.toString()}`;
+
+    const url =
+      `${API_BASE}/integrations/github/login` +
+      `?userEmail=${encodeURIComponent(githubStatusEmail)}` +
+  `&returnTo=${encodeURIComponent('/tools/generator')}` +
+  `&popup=1`;
+
+    const popup = openCenteredPopup(url);
+
+    // Popup bloqueado -> fallback a navegación normal (mejor que "no hacer nada")
+    if (!popup) {
+      window.location.href = url;
+      return;
+    }
+
+    // cuando se cierre -> refresca estado
+    const timer = window.setInterval(() => {
+      if (popup.closed) {
+        window.clearInterval(timer);
+        fetchGithubStatus();
+      }
+    }, 600);
   };
 
-  // ✅ Total horas: usa estimation.totalHours si es > 0,
-  // si no, las recalcula a partir de las tareas.
+  // ✅ Total horas
   const totalHours = useMemo(() => {
     if (!estimation) return 0;
 
@@ -275,8 +318,7 @@ export default function GeneratorPage() {
     return estimation.tasks.reduce((sum, t) => sum + getTaskHours(t), 0);
   }, [estimation]);
 
-  // ✅ Total tareas: si el backend lo manda a 0 tras regenerar,
-  // lo recalculamos SIEMPRE desde tasks (que es la fuente real).
+  // ✅ Total tareas
   const totalTasksPrice = useMemo(() => {
     if (!estimation) return 0;
 
@@ -285,10 +327,7 @@ export default function GeneratorPage() {
 
     if (!Array.isArray(estimation.tasks)) return 0;
 
-    return estimation.tasks.reduce(
-      (sum, t) => sum + safeNumber(t.taskPrice ?? t.price ?? 0),
-      0
-    );
+    return estimation.tasks.reduce((sum, t) => sum + safeNumber(t.taskPrice ?? t.price ?? 0), 0);
   }, [estimation]);
 
   // ✅ Fuerza 1% si viene vacío/0
@@ -298,13 +337,13 @@ export default function GeneratorPage() {
     return pf > 0 ? pf : 1;
   }, [estimation]);
 
-  // ✅ Comisión: derivada del totalTasksPrice (robusto)
+  // ✅ Comisión
   const platformFeeAmount = useMemo(() => {
     const amount = (totalTasksPrice * platformFeePercent) / 100;
     return +amount.toFixed(2);
   }, [totalTasksPrice, platformFeePercent]);
 
-  // ✅ Total cliente: derivado (robusto)
+  // ✅ Total cliente
   const grandTotalClientCost = useMemo(() => {
     const backend = safeNumber(estimation?.grandTotalClientCost);
     if (backend > 0) return backend;
@@ -332,15 +371,15 @@ export default function GeneratorPage() {
         const data = await res.json().catch(() => ({}));
         console.error('[generator] Error HTTP generando tareas', res.status, data);
 
-        if (res.status === 402 && data?.error === 'subscription_required') {
+        if (res.status === 402 && (data as any)?.error === 'subscription_required') {
           setError(
-            data.message ??
+            (data as any).message ??
               'Necesitas una suscripción activa de 30 €/mes para usar el generador.'
           );
           return;
         }
 
-        throw new Error(data.error || 'No se pudo generar el troceado de tareas');
+        throw new Error((data as any).error || 'No se pudo generar el troceado de tareas');
       }
 
       const data = (await res.json()) as { project: ProjectEstimation };
@@ -348,17 +387,13 @@ export default function GeneratorPage() {
       const proj = data.project;
       const fixed: ProjectEstimation = {
         ...proj,
-        platformFeePercent:
-          safeNumber(proj.platformFeePercent) > 0 ? proj.platformFeePercent : 1,
+        platformFeePercent: safeNumber(proj.platformFeePercent) > 0 ? proj.platformFeePercent : 1,
       };
 
       setEstimation(fixed);
     } catch (err: any) {
       console.error('[generator] Error generando tareas', err);
-      setError(
-        err.message ||
-          'No se pudo generar el troceado de tareas. Inténtalo de nuevo.'
-      );
+      setError(err.message || 'No se pudo generar el troceado de tareas. Inténtalo de nuevo.');
     } finally {
       setLoading(false);
     }
@@ -376,16 +411,12 @@ export default function GeneratorPage() {
       setPublishing(true);
       setPublishError(null);
 
-      const ownerEmailResolved =
-        (estimation as any).ownerEmail || session?.user?.email || null;
+      const ownerEmailResolved = (estimation as any).ownerEmail || session?.user?.email || null;
 
-      const projectTitleResolved =
-        (estimation as any).projectTitle || (estimation as any).title || null;
+      const projectTitleResolved = (estimation as any).projectTitle || (estimation as any).title || null;
 
       const projectDescriptionResolved =
-        (estimation as any).projectDescription ||
-        (estimation as any).description ||
-        null;
+        (estimation as any).projectDescription || (estimation as any).description || null;
 
       if (!ownerEmailResolved || !projectTitleResolved || !projectDescriptionResolved) {
         setPublishError('Faltan datos para publicar (email/título/descripción).');
@@ -418,13 +449,11 @@ export default function GeneratorPage() {
 
       if (!res.ok) {
         console.error('[generator] Error HTTP publicando proyecto', res.status, data);
-        const code = data?.error;
+        const code = (data as any)?.error;
 
         if (code === 'github_not_connected_owner') {
           setGithubConnected(false);
-          throw new Error(
-            'Debes conectar tu GitHub para que podamos crear el repositorio automáticamente.'
-          );
+          throw new Error('Debes conectar tu GitHub para que podamos crear el repositorio automáticamente.');
         }
 
         if (code === 'github_permissions_missing') {
@@ -434,18 +463,14 @@ export default function GeneratorPage() {
         }
 
         if (code === 'repo_not_created') {
-          throw new Error(
-            'No pudimos crear el repositorio automático. Revisa tu conexión de GitHub e inténtalo de nuevo.'
-          );
+          throw new Error('No pudimos crear el repositorio automático. Revisa tu conexión de GitHub e inténtalo de nuevo.');
         }
 
         throw new Error(code || 'No se pudo publicar el proyecto en la comunidad');
       }
 
-      // ✅ Ya está persistido en backend -> podemos limpiar borrador
       clearDraft();
-
-      router.push(data.publicUrl || `/community/${data.id}`);
+      router.push((data as any).publicUrl || `/community/${(data as any).id}`);
     } catch (err: any) {
       console.error('[generator] Error publishing project', err);
       setPublishError(err.message || 'No se pudo publicar el proyecto en la comunidad');
@@ -460,13 +485,10 @@ export default function GeneratorPage() {
         {/* Cabecera + volver al dashboard */}
         <div className="flex items-center justify-between gap-4">
           <div>
-            <h1 className="text-2xl font-bold text-slate-900">
-              Generador de tareas y presupuesto
-            </h1>
+            <h1 className="text-2xl font-bold text-slate-900">Generador de tareas y presupuesto</h1>
             <p className="mt-1 text-sm text-slate-600">
-              Divide tu proyecto en tareas con prioridad, capa técnica y precio
-              estimado. La tarifa base de trabajo es de 30 €/h y la plataforma
-              aplica un 1% de comisión sobre el presupuesto de las tareas.
+              Divide tu proyecto en tareas con prioridad, capa técnica y precio estimado. La tarifa base de trabajo es de
+              30 €/h y la plataforma aplica un 1% de comisión sobre el presupuesto de las tareas.
             </p>
           </div>
           <Link
@@ -481,9 +503,7 @@ export default function GeneratorPage() {
         <section className="rounded-2xl bg-white p-6 shadow-sm">
           <div className="space-y-4">
             <div>
-              <label className="block text-sm font-semibold text-slate-800">
-                Título del proyecto
-              </label>
+              <label className="block text-sm font-semibold text-slate-800">Título del proyecto</label>
               <input
                 type="text"
                 className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
@@ -494,9 +514,7 @@ export default function GeneratorPage() {
             </div>
 
             <div>
-              <label className="block text-sm font-semibold text-slate-800">
-                Descripción del proyecto
-              </label>
+              <label className="block text-sm font-semibold text-slate-800">Descripción del proyecto</label>
               <textarea
                 className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
                 rows={5}
@@ -507,9 +525,7 @@ export default function GeneratorPage() {
             </div>
 
             <div>
-              <label className="block text-sm font-semibold text-slate-800">
-                Email del propietario
-              </label>
+              <label className="block text-sm font-semibold text-slate-800">Email del propietario</label>
               <input
                 type="email"
                 className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
@@ -517,25 +533,15 @@ export default function GeneratorPage() {
                 onChange={(e) => setOwnerEmail(e.target.value)}
                 placeholder="tu-email@empresa.com"
               />
-              <p className="mt-1 text-xs text-slate-500">
-                Usaremos este email para asociar el proyecto generado.
-              </p>
+              <p className="mt-1 text-xs text-slate-500">Usaremos este email para asociar el proyecto generado.</p>
             </div>
 
             <div className="rounded-xl bg-slate-50 p-3 text-xs text-slate-600">
-              Este servicio está disponible mediante una suscripción de{' '}
-              <span className="font-semibold">30 €/mes</span> para convertir tu
-              idea en un plan detallado de trabajo. La tarifa técnica base es de{' '}
-              <span className="font-semibold">30 €/h</span> y la plataforma
-              aplicará un <span className="font-semibold">1%</span> de comisión
-              sobre el presupuesto de tareas generado.
+              Este servicio está disponible mediante una suscripción de <span className="font-semibold">30 €/mes</span> para convertir tu idea en un plan detallado de trabajo. La tarifa técnica base es de{' '}
+              <span className="font-semibold">30 €/h</span> y la plataforma aplicará un <span className="font-semibold">1%</span> de comisión sobre el presupuesto de tareas generado.
             </div>
 
-            {error && (
-              <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">
-                {error}
-              </div>
-            )}
+            {error && <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>}
 
             <div className="flex justify-end">
               <button
@@ -544,11 +550,7 @@ export default function GeneratorPage() {
                 disabled={loading || !projectTitle || !projectDescription || !ownerEmail}
                 className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-60"
               >
-                {loading
-                  ? 'Generando tareas…'
-                  : estimation
-                  ? 'Regenerar tareas'
-                  : 'Generar tareas'}
+                {loading ? 'Generando tareas…' : estimation ? 'Regenerar tareas' : 'Generar tareas'}
               </button>
             </div>
           </div>
@@ -557,20 +559,11 @@ export default function GeneratorPage() {
         {/* Resultado */}
         {estimation && (
           <section className="rounded-2xl bg-white p-6 shadow-sm">
-            <h2 className="text-sm font-semibold uppercase tracking-wide text-blue-600">
-              Resultado
-            </h2>
-            <h3 className="mt-1 text-xl font-bold text-slate-900">
-              {estimation.projectTitle}
-            </h3>
-            <p className="mt-1 text-sm text-slate-700">
-              {estimation.projectDescription}
-            </p>
+            <h2 className="text-sm font-semibold uppercase tracking-wide text-blue-600">Resultado</h2>
+            <h3 className="mt-1 text-xl font-bold text-slate-900">{estimation.projectTitle}</h3>
+            <p className="mt-1 text-sm text-slate-700">{estimation.projectDescription}</p>
             <p className="mt-3 text-xs text-slate-500">
-              La plataforma actúa como intermediaria entre el cliente y los
-              programadores. El presupuesto mostrado incluye un 1% de comisión
-              de plataforma. El generador se paga mediante suscripción mensual,
-              no se añade fee extra por proyecto.
+              La plataforma actúa como intermediaria entre el cliente y los programadores. El presupuesto mostrado incluye un 1% de comisión de plataforma. El generador se paga mediante suscripción mensual, no se añade fee extra por proyecto.
             </p>
 
             <div className="mt-5 overflow-x-auto">
@@ -589,34 +582,15 @@ export default function GeneratorPage() {
                 </thead>
                 <tbody>
                   {estimation.tasks.map((task, index) => (
-                    <tr
-                      key={task.id ?? index}
-                      className="border-b border-slate-100 align-top"
-                    >
-                      <td className="px-4 py-2 font-semibold text-slate-900">
-                        {task.title}
-                      </td>
-                      <td className="px-4 py-2 text-slate-700">
-                        {task.description}
-                      </td>
-                      <td className="px-4 py-2 text-slate-700">
-                        {task.category}
-                      </td>
-                      <td className="px-4 py-2 text-slate-700">
-                        {task.complexity}
-                      </td>
-                      <td className="px-4 py-2 text-slate-700">
-                        {task.priority}
-                      </td>
-                      <td className="px-4 py-2 text-slate-700">
-                        {getTaskHours(task).toFixed(2)}
-                      </td>
-                      <td className="px-4 py-2 text-slate-700">
-                        {Number(task.hourlyRate ?? 30).toFixed(2)} € / h
-                      </td>
-                      <td className="px-4 py-2 text-slate-900">
-                        {formatPrice(Number(task.taskPrice ?? task.price ?? 0))}
-                      </td>
+                    <tr key={task.id ?? index} className="border-b border-slate-100 align-top">
+                      <td className="px-4 py-2 font-semibold text-slate-900">{task.title}</td>
+                      <td className="px-4 py-2 text-slate-700">{task.description}</td>
+                      <td className="px-4 py-2 text-slate-700">{task.category}</td>
+                      <td className="px-4 py-2 text-slate-700">{task.complexity}</td>
+                      <td className="px-4 py-2 text-slate-700">{task.priority}</td>
+                      <td className="px-4 py-2 text-slate-700">{getTaskHours(task).toFixed(2)}</td>
+                      <td className="px-4 py-2 text-slate-700">{Number(task.hourlyRate ?? 30).toFixed(2)} € / h</td>
+                      <td className="px-4 py-2 text-slate-900">{formatPrice(Number(task.taskPrice ?? task.price ?? 0))}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -626,21 +600,17 @@ export default function GeneratorPage() {
             {/* Totales */}
             <div className="mt-4 grid gap-3 text-sm text-slate-700 md:grid-cols-3">
               <p>
-                Horas totales estimadas:{' '}
-                <span className="font-semibold">{totalHours.toFixed(2)}</span>
+                Horas totales estimadas: <span className="font-semibold">{totalHours.toFixed(2)}</span>
               </p>
               <p>
-                Presupuesto tareas:{' '}
-                <span className="font-semibold">{formatPrice(totalTasksPrice)}</span>
+                Presupuesto tareas: <span className="font-semibold">{formatPrice(totalTasksPrice)}</span>
               </p>
               <p>
-                Comisión plataforma ({platformFeePercent}%):{' '}
-                <span className="font-semibold">{formatPrice(platformFeeAmount)}</span>
+                Comisión plataforma ({platformFeePercent}%): <span className="font-semibold">{formatPrice(platformFeeAmount)}</span>
               </p>
             </div>
             <p className="mt-2 text-sm text-slate-700">
-              Coste total estimado para el cliente:{' '}
-              <span className="font-semibold">{formatPrice(grandTotalClientCost)}</span>
+              Coste total estimado para el cliente: <span className="font-semibold">{formatPrice(grandTotalClientCost)}</span>
             </p>
 
             <div className="mt-6 space-y-3 rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm">
@@ -649,34 +619,14 @@ export default function GeneratorPage() {
                   <div className="flex items-center gap-2 text-amber-700">
                     <span className="text-lg">⚠️</span>
                     <div>
-                      <p className="font-semibold">
-                        Para publicar este proyecto debes conectar tu cuenta de GitHub.
-                      </p>
-                      <p className="text-slate-600">
-                        Crearemos un repositorio privado automáticamente al publicar.
-                      </p>
+                      <p className="font-semibold">Para publicar este proyecto debes conectar tu cuenta de GitHub.</p>
+                      <p className="text-slate-600">Crearemos un repositorio privado automáticamente al publicar.</p>
                     </div>
                   </div>
 
                   <button
                     type="button"
-                    onClick={() => {
-                      if (!githubStatusEmail) return;
-
-                      // ✅ guarda el estado del generador antes del redirect OAuth
-                      saveDraft({
-                        projectTitle,
-                        projectDescription,
-                        ownerEmail,
-                        estimation,
-                        ts: Date.now(),
-                      });
-
-                      window.location.href =
-                        `${API_BASE}/integrations/github/login` +
-                        `?userEmail=${encodeURIComponent(githubStatusEmail)}` +
-                        `&returnTo=${encodeURIComponent('/tools/generator')}`;
-                    }}
+                    onClick={connectGithubWithPopup}
                     disabled={!githubStatusEmail || githubLoading}
                     className="inline-flex items-center justify-center rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-60"
                   >
@@ -694,18 +644,14 @@ export default function GeneratorPage() {
                   <span className="text-lg">✅</span>
                   <div>
                     <p className="font-semibold">GitHub conectado</p>
-                    <p className="text-slate-700">
-                      Se creará un repositorio privado automáticamente al publicar.
-                    </p>
+                    <p className="text-slate-700">Se creará un repositorio privado automáticamente al publicar.</p>
                   </div>
                 </div>
               )}
             </div>
 
             {publishError && (
-              <div className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">
-                {publishError}
-              </div>
+              <div className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{publishError}</div>
             )}
 
             <div className="mt-4 flex justify-end">
@@ -715,16 +661,12 @@ export default function GeneratorPage() {
                 disabled={publishing || !githubConnected || githubLoading}
                 className="w-full rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-60 md:w-auto"
               >
-                {publishing
-                  ? 'Publicando proyecto…'
-                  : 'Publicar este proyecto en la comunidad'}
+                {publishing ? 'Publicando proyecto…' : 'Publicar este proyecto en la comunidad'}
               </button>
             </div>
 
             {!githubConnected && (
-              <p className="mt-2 text-xs text-amber-700">
-                Conecta GitHub para habilitar la publicación.
-              </p>
+              <p className="mt-2 text-xs text-amber-700">Conecta GitHub para habilitar la publicación.</p>
             )}
           </section>
         )}
