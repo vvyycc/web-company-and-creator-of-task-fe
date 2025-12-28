@@ -11,6 +11,28 @@ type TaskCategory = 'ARCHITECTURE' | 'MODEL' | 'SERVICE' | 'VIEW' | 'INFRA' | 'Q
 type TaskStatus = 'TODO' | 'IN_PROGRESS' | 'IN_REVIEW' | 'DONE' | 'REJECTED';
 type VerificationStatus = 'NOT_SUBMITTED' | 'SUBMITTED' | 'APPROVED' | 'REJECTED';
 type GithubCheckStatus = 'PENDING' | 'PASSED' | 'FAILED';
+type ChecklistStatus = 'PENDING' | 'PASSED' | 'FAILED';
+
+interface ChecklistItem {
+  key: string;
+  text: string;
+  status: ChecklistStatus;
+  details?: string | null;
+}
+
+interface RepoChecksInfo {
+  status?: GithubCheckStatus | null;
+  lastRunUrl?: string | null;
+  lastRunConclusion?: string | null;
+}
+
+interface RepoInfo {
+  provider?: string;
+  repoFullName?: string | null;
+  branch?: string | null;
+  checks?: RepoChecksInfo;
+  prNumber?: number | null;
+}
 
 interface BoardColumn {
   id: ColumnId;
@@ -32,12 +54,28 @@ interface BoardTask {
   repoFullName?: string | null;
   checkStatus?: GithubCheckStatus | null;
   lastRunUrl?: string | null;
+  checklist?: ChecklistItem[];
+  repo?: RepoInfo;
 
   status?: TaskStatus;
   verificationStatus?: VerificationStatus;
   acceptanceCriteria?: string;
   verificationNotes?: string;
 }
+
+// ✅ NUEVO: Technical checklist (a nivel proyecto)
+type TechnicalChecklistItem = {
+  id: string; // taskId
+  title: string;
+  layer: TaskCategory | string;
+  priority: number;
+  acceptanceCriteria?: string;
+};
+
+type TechnicalChecklistGroup = {
+  title: string; // "Arquitectura", "Servicios / Backend", etc.
+  items: TechnicalChecklistItem[];
+};
 
 interface BoardProject {
   id: string;
@@ -47,6 +85,9 @@ interface BoardProject {
   published: boolean;
   projectRepo?: string | null; // puede venir string u object según tu backend (lo tratamos como unknown en helpers)
   repoJoined?: boolean | null;
+
+  // ✅ NUEVO
+  technicalChecklist?: TechnicalChecklistGroup[];
 }
 
 interface BoardResponse {
@@ -54,6 +95,9 @@ interface BoardResponse {
   columns: BoardColumn[];
   tasks: BoardTask[];
   repoJoined?: boolean | null;
+
+  // ✅ NUEVO (por si lo devuelves a nivel raíz)
+  technicalChecklist?: TechnicalChecklistGroup[];
 }
 
 const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:4000';
@@ -100,6 +144,125 @@ const getRepoHtmlUrl = (repo: unknown): string | null => {
   const fullName = getRepoFullName(repo);
   if (!fullName) return null;
   return `https://github.com/${fullName}`;
+};
+
+const normalizeChecklist = (raw: unknown): ChecklistItem[] => {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((item, idx) => {
+      if (!item || typeof item !== 'object') return null;
+      const it = item as any;
+      const text = toText(it.text || it.label || it.title || '');
+      const key = typeof it.key === 'string' && it.key.trim().length > 0 ? it.key : `item-${idx}`;
+      if (!text) return null;
+
+      const status: ChecklistStatus =
+        it.status === 'PASSED' || it.status === 'FAILED' ? it.status : 'PENDING';
+
+      const details = typeof it.details === 'string' ? it.details : null;
+
+      return { key, text, status, details } as ChecklistItem;
+    })
+    .filter(Boolean) as ChecklistItem[];
+};
+
+const normalizeRepo = (raw: unknown): RepoInfo | undefined => {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const repo = raw as any;
+  const checks = repo.checks || {};
+  return {
+    provider: repo.provider,
+    repoFullName: getRepoFullName(repo) || undefined,
+    branch: typeof repo.branch === 'string' ? repo.branch : undefined,
+    prNumber: typeof repo.prNumber === 'number' ? repo.prNumber : undefined,
+    checks: {
+      status: checks.status,
+      lastRunUrl: checks.lastRunUrl,
+      lastRunConclusion: checks.lastRunConclusion,
+    },
+  } as RepoInfo;
+};
+
+const mapColumnId = (raw: any): ColumnId => {
+  if (
+    raw?.columnId === 'todo' ||
+    raw?.columnId === 'doing' ||
+    raw?.columnId === 'review' ||
+    raw?.columnId === 'done'
+  ) {
+    return raw.columnId;
+  }
+
+  const status = raw?.status as TaskStatus | undefined;
+  if (status === 'IN_PROGRESS') return 'doing';
+  if (status === 'IN_REVIEW') return 'review';
+  if (status === 'DONE') return 'done';
+  return 'todo';
+};
+
+const normalizeTask = (raw: any): BoardTask => {
+  const repoInfo = normalizeRepo(raw?.repo);
+  const repoFullName = getRepoFullName(raw?.repo) || raw?.repoFullName || null;
+  const checkStatus =
+    (raw?.repo?.checks?.status as GithubCheckStatus) || (raw?.checkStatus as GithubCheckStatus) || null;
+  const lastRunUrl = raw?.repo?.checks?.lastRunUrl || raw?.lastRunUrl || null;
+
+  return {
+    id: raw?.id ?? raw?._id ?? '',
+    title: raw?.title || '',
+    description: raw?.description || '',
+    price: raw?.price ?? 0,
+    priority: raw?.priority ?? 0,
+    layer: raw?.layer || raw?.category || 'QA',
+    columnId: mapColumnId(raw),
+    assigneeEmail: raw?.assigneeEmail ?? null,
+    assigneeAvatar: raw?.assigneeAvatar ?? null,
+    repoFullName,
+    checkStatus,
+    lastRunUrl,
+    status: raw?.status,
+    verificationStatus: raw?.verificationStatus,
+    acceptanceCriteria: raw?.acceptanceCriteria,
+    verificationNotes: raw?.verificationNotes,
+    checklist: normalizeChecklist(raw?.checklist),
+    repo: repoInfo,
+  } as BoardTask;
+};
+
+const normalizeTasks = (raw: unknown): BoardTask[] => {
+  if (!Array.isArray(raw)) return [];
+  return (raw as any[]).map(normalizeTask);
+};
+
+// ✅ NUEVO: normalizar technicalChecklist venga donde venga (se mantiene, aunque ya no se renderiza en cabecera)
+const normalizeTechnicalChecklist = (raw: unknown): TechnicalChecklistGroup[] => {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((g: any) => {
+      if (!g || typeof g !== 'object') return null;
+      const title = toText(g.title || g.name || '');
+      const itemsRaw = Array.isArray(g.items) ? g.items : [];
+      const items: TechnicalChecklistItem[] = itemsRaw
+        .map((it: any) => {
+          if (!it || typeof it !== 'object') return null;
+          const id = toText(it.id || it.taskId || it._id || '');
+          const t = toText(it.title || it.text || '');
+          if (!id || !t) return null;
+          return {
+            id,
+            title: t,
+            layer: toText(it.layer || it.category || ''),
+            priority: typeof it.priority === 'number' ? it.priority : 0,
+            acceptanceCriteria: typeof it.acceptanceCriteria === 'string' ? it.acceptanceCriteria : undefined,
+          };
+        })
+        .filter(Boolean) as TechnicalChecklistItem[];
+
+      if (!title || items.length === 0) return null;
+      items.sort((a, b) => (a.priority ?? 0) - (b.priority ?? 0));
+      return { title, items } as TechnicalChecklistGroup;
+    })
+    .filter(Boolean) as TechnicalChecklistGroup[];
 };
 
 // ✅ URL login GitHub con returnTo a esta página
@@ -226,6 +389,221 @@ const mapRepoError = (code?: string) => {
   }
 };
 
+// =====================================================
+// ✅ CommunityProjectCard (CABECERA)
+// CAMBIOS:
+// - ✅ Descripción del proyecto SIN desplegable
+// - ❌ Se elimina el "Checklist técnico" del proyecto
+// =====================================================
+function CommunityProjectCard(props: {
+  project: BoardProject;
+  isOwner: boolean;
+  sessionEmail: string | null;
+
+  repoInvitationBanner: boolean;
+  repoUrl: string | null;
+  repoFullName: string | null;
+  repoAvailable: boolean;
+
+  repoJoined: boolean;
+  joiningRepo: boolean;
+  repoStatusError: string | null;
+  repoStatusMessage: string | null;
+
+  githubConnected: boolean;
+  githubLoading: boolean;
+  githubError: string | null;
+
+  onJoinRepo: () => void;
+
+  actionMessage: unknown;
+  actionError: unknown;
+}) {
+  const {
+    project,
+    isOwner,
+    sessionEmail,
+    repoInvitationBanner,
+    repoUrl,
+    repoFullName,
+    repoAvailable,
+    repoJoined,
+    joiningRepo,
+    repoStatusError,
+    repoStatusMessage,
+    githubConnected,
+    githubLoading,
+    githubError,
+    onJoinRepo,
+    actionMessage,
+    actionError,
+  } = props;
+
+  return (
+    <div className="rounded-2xl bg-white p-6 shadow-sm">
+      <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-wide text-blue-600">Comunidad</p>
+          <h1 className="mt-1 text-3xl font-bold text-slate-900">{project.title}</h1>
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          <Link
+            href="/dashboard"
+            className="inline-flex items-center justify-center rounded-lg border border-slate-300 px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+          >
+            Volver al dashboard
+          </Link>
+          <Link
+            href="/tools/generator"
+            className="inline-flex items-center justify-center rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-700"
+          >
+            Volver al generador
+          </Link>
+        </div>
+      </div>
+
+      {/* ✅ Descripción del proyecto (SIN desplegable) */}
+      <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+        <p className="text-xs font-semibold text-slate-800">Descripción del proyecto</p>
+
+        <div className="mt-3 whitespace-pre-wrap text-sm text-slate-700">{project.description}</div>
+
+        <p className="mt-3 text-xs text-slate-500">
+          Publicado por <span className="font-medium">{project.ownerEmail}</span>. Los desarrolladores pueden arrastrar
+          tareas entre columnas para colaborar.
+        </p>
+
+        {!sessionEmail && (
+          <p className="mt-2 text-xs text-amber-600">Inicia sesión para poder interactuar con las tareas.</p>
+        )}
+
+        {isOwner && (
+          <p className="mt-2 text-xs text-slate-500">
+            Estás viendo tu propio proyecto. Puedes aprobar o rechazar tareas en revisión y gestionar el tablero sin
+            unirte al repositorio.
+          </p>
+        )}
+      </div>
+
+      {repoInvitationBanner && (
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-xs text-blue-800">
+          <p className="font-semibold">Has sido invitado al repositorio.</p>
+          {repoUrl && (
+            <Link
+              href={repoUrl}
+              target="_blank"
+              className="inline-flex items-center rounded-lg bg-slate-900 px-3 py-2 text-xs font-semibold text-white hover:bg-slate-800"
+            >
+              Abrir repositorio
+            </Link>
+          )}
+        </div>
+      )}
+
+      {/* Bloque repo (igual que antes) */}
+      <div className="mt-4 space-y-3 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+        {repoAvailable ? (
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <p className="text-sm font-semibold text-slate-900">Repositorio</p>
+              <p className="text-xs text-slate-600">{repoFullName ?? '—'}</p>
+            </div>
+
+            {repoUrl && (
+              <Link
+                href={repoUrl}
+                target="_blank"
+                className="inline-flex items-center rounded-lg bg-slate-900 px-3 py-2 text-xs font-semibold text-white hover:bg-slate-800"
+              >
+                Abrir en GitHub
+              </Link>
+            )}
+          </div>
+        ) : (
+          <div className="flex items-start gap-2 text-amber-700">
+            <span className="text-lg">⚠️</span>
+            <div>
+              <p className="text-sm font-semibold">Repositorio no disponible.</p>
+              <p className="text-xs">Repositorio no disponible. El proyecto no se publicó correctamente.</p>
+            </div>
+          </div>
+        )}
+
+        {/* ✅ Banner para dev no owner */}
+        {!isOwner && repoAvailable && !repoJoined && (
+          <div className="space-y-2 rounded-xl bg-amber-50 px-4 py-3 text-xs text-amber-900">
+            <p className="font-semibold">Antes de colaborar debes unirte al repositorio.</p>
+
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={onJoinRepo}
+                disabled={joiningRepo || !sessionEmail}
+                className="rounded-lg bg-amber-700 px-3 py-2 text-[11px] font-semibold text-white hover:bg-amber-800 disabled:opacity-60"
+              >
+                {joiningRepo ? 'Solicitando acceso…' : githubConnected ? 'Unirme al repo' : 'Conectar GitHub para unirme'}
+              </button>
+
+              {repoUrl && (
+                <Link
+                  href={repoUrl}
+                  target="_blank"
+                  className="rounded-lg bg-white px-3 py-2 text-[11px] font-semibold text-amber-800 ring-1 ring-amber-200 hover:bg-amber-100"
+                >
+                  Abrir repositorio
+                </Link>
+              )}
+            </div>
+
+            {githubLoading ? (
+              <p className="text-[11px] text-slate-600">Comprobando integración GitHub…</p>
+            ) : !githubConnected ? (
+              <p className="text-[11px] text-amber-800">
+                Primero conecta GitHub para poder aceptar/recibir invitación al repositorio.
+              </p>
+            ) : null}
+
+            {githubError && <p className="text-[11px] text-red-700">{githubError}</p>}
+            {repoStatusError && <p className="text-[11px] text-red-700">{repoStatusError}</p>}
+            {repoStatusMessage && <p className="text-[11px] text-emerald-700">{repoStatusMessage}</p>}
+          </div>
+        )}
+
+        {!isOwner && repoAvailable && repoJoined && (
+          <div className="flex items-start gap-2 text-emerald-700">
+            <span className="text-lg">✅</span>
+            <div>
+              <p className="text-sm font-semibold">Acceso al repositorio confirmado.</p>
+              <p className="text-xs text-slate-700">Ya puedes mover tareas en el tablero.</p>
+              {repoUrl && (
+                <div className="mt-2">
+                  <Link
+                    href={repoUrl}
+                    target="_blank"
+                    className="inline-flex rounded-lg bg-emerald-700 px-3 py-2 text-[11px] font-semibold text-white hover:bg-emerald-800"
+                  >
+                    Abrir repositorio
+                  </Link>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {(actionMessage != null || actionError != null) && (
+        <div
+          className={`mt-4 rounded-lg border px-4 py-3 text-xs ${
+            actionMessage ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-red-200 bg-red-50 text-red-700'
+          }`}
+        >
+          {toText(actionMessage ?? actionError)}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function CommunityProjectBoard() {
   const router = useRouter();
   const { id } = router.query;
@@ -292,14 +670,19 @@ export default function CommunityProjectBoard() {
     if (!currentEmail) return;
 
     // Owner: siempre joined
-    if (project?.ownerEmail && String(project.ownerEmail).toLowerCase() === String(currentEmail).toLowerCase()) {
+    if (
+      project?.ownerEmail &&
+      String(project.ownerEmail).toLowerCase() === String(currentEmail).toLowerCase()
+    ) {
       setRepoJoined(true);
       return;
     }
 
     try {
       const res = await fetch(
-        `${API_BASE}/community/projects/${projectId}/repo/status?userEmail=${encodeURIComponent(currentEmail)}`
+        `${API_BASE}/community/projects/${projectId}/repo/status?userEmail=${encodeURIComponent(
+          currentEmail
+        )}`
       );
       const data = await res.json().catch(() => ({}));
       if (!res.ok) return;
@@ -346,9 +729,20 @@ export default function CommunityProjectBoard() {
           ? true
           : Boolean((data as any).repoJoined ?? (data.project as any)?.repoJoined ?? false);
 
-        setProject(data.project);
+        // ✅ (se mantiene normalización por si la usas más adelante)
+        const techRaw =
+          (data as any).technicalChecklist ??
+          (data.project as any)?.technicalChecklist ??
+          (data.project as any)?.estimation?.technicalChecklist;
+
+        const projectWithTech: BoardProject = {
+          ...data.project,
+          technicalChecklist: normalizeTechnicalChecklist(techRaw),
+        };
+
+        setProject(projectWithTech);
         setColumns(cols);
-        setTasks(data.tasks);
+        setTasks(normalizeTasks((data as any).tasks));
         setRepoJoined(initialRepoJoined);
 
         // ✅ IMPORTANTE: tras cargar, confirma estado real (persistencia tras refresh)
@@ -396,7 +790,7 @@ export default function CommunityProjectBoard() {
 
     const handleBoardUpdated = (payload: { projectId: string; tasks: BoardTask[] }) => {
       if (payload.projectId !== project.id) return;
-      setTasks(payload.tasks);
+      setTasks(normalizeTasks(payload.tasks));
     };
 
     const handleUserInvited = (payload: { projectId: string; userEmail?: string }) => {
@@ -514,7 +908,7 @@ export default function CommunityProjectBoard() {
             mapRepoError((data as any).error) || (data as any).error || 'No se pudo asignar la tarea'
           );
 
-        setTasks(data.tasks as BoardTask[]);
+        setTasks(normalizeTasks((data as any).tasks));
       } else if (sourceColumn === 'doing' && targetColumn === 'done') {
         setMutatingTaskId(task.id);
 
@@ -532,7 +926,7 @@ export default function CommunityProjectBoard() {
               'No se pudo marcar la tarea como hecha'
           );
 
-        setTasks(data.tasks as BoardTask[]);
+        setTasks(normalizeTasks((data as any).tasks));
       } else if (sourceColumn === 'doing' && targetColumn === 'todo') {
         setMutatingTaskId(task.id);
 
@@ -548,7 +942,7 @@ export default function CommunityProjectBoard() {
             mapRepoError((data as any).error) || (data as any).error || 'No se pudo desasignar la tarea'
           );
 
-        setTasks(data.tasks as BoardTask[]);
+        setTasks(normalizeTasks((data as any).tasks));
       }
     } catch (err: any) {
       console.error('[community-board] Error moviendo tarea', err);
@@ -595,7 +989,7 @@ export default function CommunityProjectBoard() {
       const data = await res.json().catch(() => ({} as any));
       if (!res.ok) throw new Error((data as any).error || 'No se pudo enviar a revisión');
 
-      if (Array.isArray((data as any).tasks)) setTasks((data as any).tasks as BoardTask[]);
+      if (Array.isArray((data as any).tasks)) setTasks(normalizeTasks((data as any).tasks));
       closeModal();
     } catch (e: any) {
       setModalErr(e.message || 'Error');
@@ -621,7 +1015,7 @@ export default function CommunityProjectBoard() {
       const data = await res.json().catch(() => ({} as any));
       if (!res.ok) throw new Error((data as any).error || 'No se pudo revisar la tarea');
 
-      if (Array.isArray((data as any).tasks)) setTasks((data as any).tasks as BoardTask[]);
+      if (Array.isArray((data as any).tasks)) setTasks(normalizeTasks((data as any).tasks));
       closeModal();
     } catch (e: any) {
       setModalErr(e.message || 'Error');
@@ -647,7 +1041,7 @@ export default function CommunityProjectBoard() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error((data as any).error || 'No se pudo ejecutar la verificación');
 
-      if (Array.isArray((data as any).tasks)) setTasks((data as any).tasks as BoardTask[]);
+      if (Array.isArray((data as any).tasks)) setTasks(normalizeTasks((data as any).tasks));
       setActionMessage('Verificación solicitada.');
     } catch (err: any) {
       console.error('[github] verify error', err);
@@ -750,165 +1144,26 @@ export default function CommunityProjectBoard() {
   return (
     <main className="min-h-screen bg-slate-50 p-6">
       <div className="mx-auto max-w-6xl space-y-6">
-        {/* Cabecera */}
-        <div className="rounded-2xl bg-white p-6 shadow-sm">
-          <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-            <div>
-              <p className="text-xs font-semibold uppercase tracking-wide text-blue-600">Comunidad</p>
-              <h1 className="mt-1 text-3xl font-bold text-slate-900">{project.title}</h1>
-            </div>
-
-            <div className="flex flex-wrap gap-2">
-              <Link
-                href="/dashboard"
-                className="inline-flex items-center justify-center rounded-lg border border-slate-300 px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
-              >
-                Volver al dashboard
-              </Link>
-              <Link
-                href="/tools/generator"
-                className="inline-flex items-center justify-center rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-700"
-              >
-                Volver al generador
-              </Link>
-            </div>
-          </div>
-
-          <p className="mt-1 text-sm text-slate-700">{project.description}</p>
-          <p className="mt-3 text-xs text-slate-500">
-            Publicado por <span className="font-medium">{project.ownerEmail}</span>. Los desarrolladores pueden arrastrar
-            tareas entre columnas para colaborar.
-          </p>
-
-          {repoInvitationBanner && (
-            <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-xs text-blue-800">
-              <p className="font-semibold">Has sido invitado al repositorio.</p>
-              {repoUrl && (
-                <Link
-                  href={repoUrl}
-                  target="_blank"
-                  className="inline-flex items-center rounded-lg bg-slate-900 px-3 py-2 text-xs font-semibold text-white hover:bg-slate-800"
-                >
-                  Abrir repositorio
-                </Link>
-              )}
-            </div>
-          )}
-
-          {!session?.user?.email && (
-            <p className="mt-3 text-xs text-amber-600">Inicia sesión para poder interactuar con las tareas.</p>
-          )}
-
-          {isOwner && (
-            <p className="mt-3 text-xs text-slate-500">
-              Estás viendo tu propio proyecto. Puedes aprobar o rechazar tareas en revisión y gestionar el tablero sin
-              unirte al repositorio.
-            </p>
-          )}
-
-          {/* Bloque repo */}
-          <div className="mt-4 space-y-3 rounded-2xl border border-slate-200 bg-slate-50 p-4">
-            {repoAvailable ? (
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <p className="text-sm font-semibold text-slate-900">Repositorio</p>
-                  <p className="text-xs text-slate-600">{repoFullName ?? '—'}</p>
-                </div>
-
-                {repoUrl && (
-                  <Link
-                    href={repoUrl}
-                    target="_blank"
-                    className="inline-flex items-center rounded-lg bg-slate-900 px-3 py-2 text-xs font-semibold text-white hover:bg-slate-800"
-                  >
-                    Abrir en GitHub
-                  </Link>
-                )}
-              </div>
-            ) : (
-              <div className="flex items-start gap-2 text-amber-700">
-                <span className="text-lg">⚠️</span>
-                <div>
-                  <p className="text-sm font-semibold">Repositorio no disponible.</p>
-                  <p className="text-xs">Repositorio no disponible. El proyecto no se publicó correctamente.</p>
-                </div>
-              </div>
-            )}
-
-            {/* ✅ Banner para dev no owner */}
-            {!isOwner && repoAvailable && !repoJoined && (
-              <div className="space-y-2 rounded-xl bg-amber-50 px-4 py-3 text-xs text-amber-900">
-                <p className="font-semibold">Antes de colaborar debes unirte al repositorio.</p>
-
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    onClick={handleJoinRepo}
-                    disabled={joiningRepo || !session?.user?.email}
-                    className="rounded-lg bg-amber-700 px-3 py-2 text-[11px] font-semibold text-white hover:bg-amber-800 disabled:opacity-60"
-                  >
-                    {joiningRepo
-                      ? 'Solicitando acceso…'
-                      : githubIntegration.connected
-                        ? 'Unirme al repo'
-                        : 'Conectar GitHub para unirme'}
-                  </button>
-
-                  {repoUrl && (
-                    <Link
-                      href={repoUrl}
-                      target="_blank"
-                      className="rounded-lg bg-white px-3 py-2 text-[11px] font-semibold text-amber-800 ring-1 ring-amber-200 hover:bg-amber-100"
-                    >
-                      Abrir repositorio
-                    </Link>
-                  )}
-                </div>
-
-                {!githubIntegration.connected && (
-                  <p className="text-[11px] text-amber-800">
-                    Primero conecta GitHub para poder aceptar/recibir invitación al repositorio.
-                  </p>
-                )}
-
-                {repoStatusError && <p className="text-[11px] text-red-700">{repoStatusError}</p>}
-                {repoStatusMessage && <p className="text-[11px] text-emerald-700">{repoStatusMessage}</p>}
-              </div>
-            )}
-
-            {!isOwner && repoAvailable && repoJoined && (
-              <div className="flex items-start gap-2 text-emerald-700">
-                <span className="text-lg">✅</span>
-                <div>
-                  <p className="text-sm font-semibold">Acceso al repositorio confirmado.</p>
-                  <p className="text-xs text-slate-700">Ya puedes mover tareas en el tablero.</p>
-                  {repoUrl && (
-                    <div className="mt-2">
-                      <Link
-                        href={repoUrl}
-                        target="_blank"
-                        className="inline-flex rounded-lg bg-emerald-700 px-3 py-2 text-[11px] font-semibold text-white hover:bg-emerald-800"
-                      >
-                        Abrir repositorio
-                      </Link>
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
-          </div>
-
-          {(actionMessage != null || actionError != null) && (
-            <div
-              className={`mt-4 rounded-lg border px-4 py-3 text-xs ${
-                actionMessage
-                  ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
-                  : 'border-red-200 bg-red-50 text-red-700'
-              }`}
-            >
-              {toText(actionMessage ?? actionError)}
-            </div>
-          )}
-        </div>
+        {/* ✅ Cabecera sustituida por CommunityProjectCard */}
+        <CommunityProjectCard
+          project={project}
+          isOwner={isOwner}
+          sessionEmail={session?.user?.email ?? null}
+          repoInvitationBanner={repoInvitationBanner}
+          repoUrl={repoUrl}
+          repoFullName={repoFullName}
+          repoAvailable={repoAvailable}
+          repoJoined={repoJoined}
+          joiningRepo={joiningRepo}
+          repoStatusError={repoStatusError}
+          repoStatusMessage={repoStatusMessage}
+          githubConnected={githubIntegration.connected}
+          githubLoading={githubIntegration.loading}
+          githubError={githubIntegration.error}
+          onJoinRepo={handleJoinRepo}
+          actionMessage={actionMessage}
+          actionError={actionError}
+        />
 
         {/* Tablero */}
         <div className="grid gap-4 md:grid-cols-4">
@@ -947,19 +1202,18 @@ export default function CommunityProjectBoard() {
                       const isMutating = mutatingTaskId === task.id;
 
                       // ✅ NO mostrar botón de verificación al owner
-                    const canRunVerification =
-  task.columnId === 'review' &&
-  !!task.assigneeEmail &&
-  currentEmail === task.assigneeEmail &&
-  !isOwner &&
-  !!repoFullName;
+                      const canRunVerification =
+                        task.columnId === 'review' &&
+                        !!task.assigneeEmail &&
+                        currentEmail === task.assigneeEmail &&
+                        !isOwner &&
+                        !!repoFullName;
 
                       const canShowGithubSection =
                         isAssignedToMe &&
                         task.columnId === 'doing' &&
                         (isPriorityOne(task) || mostPrioritaryAssigned(task));
 
-                      // const repoValue = repoInputs[task.id] ?? task.repoFullName ?? '';
                       const showAssignmentMessage = isAssignedToMe && task.columnId === 'doing';
                       const badge = getTaskBadge(task);
 
@@ -970,10 +1224,13 @@ export default function CommunityProjectBoard() {
                       return (
                         <article
                           key={task.id}
+                          id={`task-${task.id}`}
                           className="relative cursor-default rounded-xl bg-white p-4 text-sm shadow-sm ring-1 ring-slate-200"
-                          draggable={session?.user?.email && canCollaborate && task.columnId !== 'done' ? true : undefined}
+                          draggable={
+                            session?.user?.email && canCollaborate && task.columnId !== 'done' ? true : undefined
+                          }
                           onDragStart={() => handleDragStart(task.id, task.columnId)}
-                          onDragEnd={handleDragEnd}
+                          onDragEnd={() => setDraggedTaskId(null)}
                         >
                           <div className="absolute right-3 top-3">
                             <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${badge.className}`}>
@@ -1008,15 +1265,84 @@ export default function CommunityProjectBoard() {
                             </div>
                           )}
 
-                          <p className="mb-3 text-xs text-slate-600">{task.description}</p>
+                          {/* ✅ Descripción desplegable SOLO en tarjeta */}
+                          <details className="group mb-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
+                            <summary className="cursor-pointer list-none select-none">
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="text-[11px] font-semibold text-slate-800">Descripción</span>
+                                <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-semibold text-slate-700 ring-1 ring-slate-200">
+                                  <span className="group-open:hidden">Mostrar</span>
+                                  <span className="hidden group-open:inline">Ocultar</span>
+                                </span>
+                              </div>
+                            </summary>
+
+                            <div className="mt-2 whitespace-pre-wrap text-xs text-slate-700">{task.description}</div>
+                          </details>
 
                           <div className="mb-1 flex items-center justify-between text-xs text-slate-600">
                             <span>Prioridad: {task.priority}</span>
                             <span className="font-semibold text-slate-900">{formatPrice(task.price)}</span>
                           </div>
 
+                          {/* ✅ Checklist INLINE SIEMPRE (checkboxes) */}
+                          {task.checklist && task.checklist.length > 0 && (
+                            <div className="mt-3 space-y-2 rounded-lg border border-slate-200 bg-slate-50 p-3 text-[11px] text-slate-700">
+                              <div className="font-semibold text-slate-800">Checklist</div>
+
+                              <ul className="space-y-2">
+                                {task.checklist.map((item) => {
+                                  const status = (item.status || 'PENDING') as ChecklistStatus;
+
+                                  // Solo mostramos ✅/❌ cuando está en review o done.
+                                  // En todo/doing mostramos ⏳ y el checkbox queda desmarcado (readOnly).
+                                  const showResultIcon = task.columnId === 'review' || task.columnId === 'done';
+                                  const isPassed = status === 'PASSED';
+                                  const isFailed = status === 'FAILED';
+
+                                  const icon = !showResultIcon ? '⏳' : isPassed ? '✅' : isFailed ? '❌' : '⏳';
+                                  const iconClass = !showResultIcon
+                                    ? 'text-slate-400'
+                                    : isPassed
+                                      ? 'text-emerald-600'
+                                      : isFailed
+                                        ? 'text-red-600'
+                                        : 'text-yellow-700';
+
+                                  return (
+                                    <li
+                                      key={item.key}
+                                      className="flex items-start gap-2 rounded-lg bg-white p-2 ring-1 ring-slate-200"
+                                    >
+                                      <input
+                                        type="checkbox"
+                                        checked={showResultIcon ? isPassed : false}
+                                        readOnly
+                                        className="mt-0.5 h-4 w-4"
+                                      />
+                                      <div className="min-w-0 flex-1">
+                                        <div className="flex items-start justify-between gap-2">
+                                          <span className="text-[11px] font-semibold text-slate-800">{item.text}</span>
+                                          <span className={`text-[12px] ${iconClass}`} title={status}>
+                                            {icon}
+                                          </span>
+                                        </div>
+
+                                        {item.details && (
+                                          <div className="mt-1 whitespace-pre-wrap text-[10px] text-slate-600">
+                                            {item.details}
+                                          </div>
+                                        )}
+                                      </div>
+                                    </li>
+                                  );
+                                })}
+                              </ul>
+                            </div>
+                          )}
+
                           {showAssignmentMessage && (
-                            <p className="mt-1 text-[11px] text-emerald-600">Esta tarea está asignada a ti.</p>
+                            <p className="mt-2 text-[11px] text-emerald-600">Esta tarea está asignada a ti.</p>
                           )}
 
                           {canShowGithubSection && (
@@ -1059,11 +1385,7 @@ export default function CommunityProjectBoard() {
                                 </div>
                               ) : (
                                 <div className="space-y-2">
-                                  {/* Si quieres volver a habilitar "Vincular repo" aquí,
-                                      añade input + botón y endpoint /link-repo en backend */}
-                                  <p className="text-[11px] text-slate-500">
-                                    Repo de tarea no vinculado.
-                                  </p>
+                                  <p className="text-[11px] text-slate-500">Repo de tarea no vinculado.</p>
                                 </div>
                               )}
                             </div>
@@ -1101,8 +1423,25 @@ export default function CommunityProjectBoard() {
                                 </div>
                               )}
 
-                              {task.checkStatus === 'FAILED' && (
-                                <p className="text-[11px] text-red-600">Corrige y vuelve a enviar.</p>
+                              {/* ✅ Mensaje en review (sin checklist duplicada aquí) */}
+                              {task.checkStatus === 'FAILED' ? (
+                                <p className="text-[11px] text-red-700">
+                                  ❌ Han fallado tests. Esta tarea debe corregirse y volverá a <b>DOING</b> hasta pasar
+                                  todos.
+                                </p>
+                              ) : (
+                                <p className="text-[11px] text-slate-600">
+                                  Cuando todos los checks estén ✅, la tarea pasará automáticamente a <b>DONE</b>.
+                                </p>
+                              )}
+
+                              {task.lastRunUrl && (
+                                <div className="text-[11px]">
+                                  Última ejecución:{' '}
+                                  <Link href={task.lastRunUrl} target="_blank" className="text-indigo-600 underline">
+                                    Ver reporte
+                                  </Link>
+                                </div>
                               )}
                             </div>
                           )}
