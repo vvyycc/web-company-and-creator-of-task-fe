@@ -234,10 +234,13 @@ const normalizeTasks = (raw: unknown): BoardTask[] => {
   return (raw as any[]).map(normalizeTask);
 };
 
-const getChecklistStatusVisuals = (status: ChecklistStatus) => {
+const getChecklistStatusVisuals = (status: ChecklistStatus, context: 'review' | 'work') => {
+  if (context === 'work') {
+    return { icon: '⏳', className: 'text-slate-400' };
+  }
   if (status === 'PASSED') return { icon: '✅', className: 'text-emerald-600' };
   if (status === 'FAILED') return { icon: '❌', className: 'text-red-600' };
-  return { icon: '⏳', className: 'text-slate-400' };
+  return { icon: '⏳', className: 'text-amber-500' };
 };
 
 // ✅ NUEVO: normalizar technicalChecklist venga donde venga (se mantiene, aunque ya no se renderiza en cabecera)
@@ -610,6 +613,38 @@ function CommunityProjectCard(props: {
   );
 }
 
+function TaskDescription({ text }: { text: string }) {
+  const [expanded, setExpanded] = useState(false);
+  if (!text) return null;
+
+  const clampStyle = expanded
+    ? undefined
+    : {
+        display: '-webkit-box',
+        WebkitLineClamp: 2,
+        WebkitBoxOrient: 'vertical' as const,
+        overflow: 'hidden',
+      };
+
+  return (
+    <div className="mb-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[11px] font-semibold text-slate-800">Descripción</span>
+        <button
+          type="button"
+          className="text-[10px] font-semibold text-indigo-600 hover:text-indigo-700"
+          onClick={() => setExpanded((v) => !v)}
+        >
+          {expanded ? 'Ver menos' : 'Ver más'}
+        </button>
+      </div>
+      <div className="mt-2 whitespace-pre-wrap text-xs text-slate-700" style={clampStyle}>
+        {text}
+      </div>
+    </div>
+  );
+}
+
 export default function CommunityProjectBoard() {
   const router = useRouter();
   const { id } = router.query;
@@ -682,6 +717,9 @@ export default function CommunityProjectBoard() {
 
     if (!checklist.length && !showEmptyMessage) return null;
 
+    const isReview = task.columnId === 'review';
+    const context: 'review' | 'work' = isReview ? 'review' : 'work';
+
     return (
       <div className={wrapperBase}>
         <div className="font-semibold text-slate-800">Checklist</div>
@@ -690,26 +728,42 @@ export default function CommunityProjectBoard() {
           <p className="text-[11px] text-slate-500">Checklist pendiente de generación</p>
         ) : (
           <ul className="space-y-2">
-            {checklist.map((item) => {
-              const status = (item.status || 'PENDING') as ChecklistStatus;
-              const visuals = getChecklistStatusVisuals(status);
+            {checklist.map((item, idx) => {
+              const status = (item?.status || 'PENDING') as ChecklistStatus;
+              const visuals = getChecklistStatusVisuals(status, context);
               const isPassed = status === 'PASSED';
+              const isFailed = status === 'FAILED';
+              const isPending = !isPassed && !isFailed;
+              const showIcon = isReview || (!isReview && (isPassed || isFailed));
 
               return (
                 <li
-                  key={item.key}
-                  className="flex items-start gap-2 rounded-lg bg-white p-2 ring-1 ring-slate-200"
+                  key={item?.key || `check-${idx}`}
+                  className="flex items-start gap-2 rounded-md px-1 py-1"
                 >
-                  <input type="checkbox" checked={isPassed} readOnly className="mt-0.5 h-4 w-4" />
+                  <span
+                    className={`mt-0.5 inline-flex h-4 w-4 items-center justify-center rounded border text-[10px] ${
+                      isPassed
+                        ? 'border-emerald-500 bg-emerald-50 text-emerald-600'
+                        : isFailed
+                          ? 'border-red-500 bg-red-50 text-red-600'
+                          : 'border-slate-300 bg-white text-slate-400'
+                    }`}
+                    title={status}
+                  >
+                    {showIcon ? visuals.icon : ''}
+                  </span>
                   <div className="min-w-0 flex-1">
                     <div className="flex items-start justify-between gap-2">
-                      <span className="text-[11px] font-semibold text-slate-800">{item.text}</span>
-                      <span className={`text-[12px] ${visuals.className}`} title={status}>
-                        {visuals.icon}
-                      </span>
+                      <span className="text-[11px] font-semibold text-slate-800">{item?.text || '—'}</span>
+                      {isReview && (
+                        <span className={`text-[12px] ${visuals.className}`} title={status}>
+                          {visuals.icon}
+                        </span>
+                      )}
                     </div>
 
-                    {item.details && (
+                    {item?.details && (
                       <div className="mt-1 whitespace-pre-wrap text-[10px] text-slate-600">{item.details}</div>
                     )}
                   </div>
@@ -1327,20 +1381,7 @@ export default function CommunityProjectBoard() {
                             </div>
                           )}
 
-                          {/* ✅ Descripción desplegable SOLO en tarjeta */}
-                          <details className="group mb-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
-                            <summary className="cursor-pointer list-none select-none">
-                              <div className="flex items-center justify-between gap-2">
-                                <span className="text-[11px] font-semibold text-slate-800">Descripción</span>
-                                <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-semibold text-slate-700 ring-1 ring-slate-200">
-                                  <span className="group-open:hidden">Mostrar</span>
-                                  <span className="hidden group-open:inline">Ocultar</span>
-                                </span>
-                              </div>
-                            </summary>
-
-                            <div className="mt-2 whitespace-pre-wrap text-xs text-slate-700">{task.description}</div>
-                          </details>
+                          <TaskDescription text={task.description} />
 
                           <div className="mb-1 flex items-center justify-between text-xs text-slate-600">
                             <span>Prioridad: {task.priority}</span>
@@ -1352,6 +1393,9 @@ export default function CommunityProjectBoard() {
                           {showAssignmentMessage && (
                             <div className="mt-2 space-y-1 text-[11px] text-emerald-600">
                               <p>Esta tarea está asignada a ti.</p>
+                              {task.checkStatus === 'PENDING' && (
+                                <p className="text-[11px] text-slate-600">Generando verificación…</p>
+                              )}
                               {task.repo?.branch && typeof task.repo.branch === 'string' && (
                                 <p className="text-[10px] text-slate-600">
                                   Spec creado en rama: <span className="font-semibold text-slate-800">{task.repo.branch}</span>
@@ -1418,9 +1462,11 @@ export default function CommunityProjectBoard() {
                                       : check === 'FAILED'
                                         ? 'bg-red-100 text-red-700'
                                         : 'bg-yellow-100 text-yellow-800';
+                                  const label =
+                                    check === 'PASSED' ? 'PASSED' : check === 'FAILED' ? 'FAILED' : 'PENDING';
                                   return (
                                     <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${badgeClasses}`}>
-                                      {check}
+                                      {label}
                                     </span>
                                   );
                                 })()}
@@ -1441,9 +1487,7 @@ export default function CommunityProjectBoard() {
                               )}
 
                               {task.checkStatus === 'FAILED' ? (
-                                <p className="text-[11px] font-semibold text-red-700">
-                                  ❌ Falló la verificación. Volvió a <b>DOING</b> hasta que todos los checks pasen.
-                                </p>
+                                <p className="text-[11px] font-semibold text-red-700">Verificación falló: la tarea vuelve a DOING</p>
                               ) : (
                                 <p className="text-[11px] text-slate-600">
                                   Cuando todos los checks estén ✅, la tarea pasará automáticamente a <b>DONE</b>.
