@@ -3,50 +3,11 @@ import { useEffect, useMemo, useState } from 'react';
 import { useSession } from 'next-auth/react';
 import { useRouter } from 'next/router';
 import Link from 'next/link';
+import { RecommendedStack, ProjectEstimation, Task } from '../../types/projects';
+import { useGenerateTasksMutation } from '../../hooks/useGenerateTasksMutation';
+import { RecommendedStackPanel } from '../../components/RecommendedStackPanel';
 
 const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:4000';
-
-type TaskComplexity = 'SIMPLE' | 'MEDIUM' | 'HIGH';
-
-type TaskCategory = 'ARCHITECTURE' | 'MODEL' | 'SERVICE' | 'VIEW' | 'INFRA' | 'QA';
-
-type ColumnId = 'todo' | 'doing' | 'done';
-
-export interface GeneratedTask {
-  id: string;
-  title: string;
-  description: string;
-  category: TaskCategory;
-  complexity: TaskComplexity;
-  priority: number;
-  estimatedHours: number; // puede venir vacío en la práctica
-  hourlyRate: number;
-  taskPrice: number;
-  // alias legacy
-  layer?: TaskCategory;
-  price?: number;
-  developerNetPrice?: number;
-  // board
-  columnId?: ColumnId;
-  assigneeEmail?: string | null;
-  assigneeAvatar?: string | null;
-}
-
-export interface ProjectEstimation {
-  id?: string;
-  projectTitle: string;
-  projectDescription: string;
-  ownerEmail: string;
-  tasks: GeneratedTask[];
-  totalHours: number;
-  totalTasksPrice: number;
-  platformFeePercent: number;
-  platformFeeAmount: number;
-  generatorServiceFee?: number;
-  generatorFee?: number;
-  grandTotalClientCost: number;
-  published?: boolean;
-}
 
 const formatPrice = (value: number) =>
   new Intl.NumberFormat('es-ES', {
@@ -58,7 +19,7 @@ const safeNumber = (v: unknown): number =>
   typeof v === 'number' && !Number.isNaN(v) ? v : 0;
 
 // 🔹 Calcula las horas de una tarea usando estimatedHours o (precio/tarifa)
-const getTaskHours = (task: GeneratedTask): number => {
+const getTaskHours = (task: Task): number => {
   const explicit =
     typeof task.estimatedHours === 'number' && !Number.isNaN(task.estimatedHours)
       ? task.estimatedHours
@@ -93,6 +54,7 @@ type GeneratorDraft = {
   projectDescription: string;
   ownerEmail: string;
   estimation: ProjectEstimation | null;
+  stackDraft?: RecommendedStack | null;
   ts: number;
 };
 
@@ -153,6 +115,7 @@ export default function GeneratorPage() {
   const [projectDescription, setProjectDescription] = useState('');
   const [ownerEmail, setOwnerEmail] = useState('');
   const [estimation, setEstimation] = useState<ProjectEstimation | null>(null);
+  const [stackDraft, setStackDraft] = useState<RecommendedStack | null>(null);
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -192,6 +155,7 @@ export default function GeneratorPage() {
       setProjectDescription(draft.projectDescription || '');
       setOwnerEmail(draft.ownerEmail || session?.user?.email || '');
       setEstimation(draft.estimation || null);
+      setStackDraft(draft.stackDraft ?? draft.estimation?.recommendedStack ?? null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [router.isReady]);
@@ -211,9 +175,10 @@ export default function GeneratorPage() {
       projectDescription,
       ownerEmail,
       estimation,
+      stackDraft,
       ts: Date.now(),
     });
-  }, [projectTitle, projectDescription, ownerEmail, estimation]);
+  }, [projectTitle, projectDescription, ownerEmail, estimation, stackDraft]);
 
   const fetchGithubStatus = async () => {
     if (!githubStatusEmail) {
@@ -350,47 +315,37 @@ export default function GeneratorPage() {
     return +(totalTasksPrice + platformFeeAmount).toFixed(2);
   }, [estimation?.grandTotalClientCost, totalTasksPrice, platformFeeAmount]);
 
+  const { loading: mutationLoading, error: mutationError, mutate } = useGenerateTasksMutation();
+
   const handleGenerateTasks = async () => {
     try {
       setLoading(true);
       setError(null);
       setPublishError(null);
       setEstimation(null);
+      setStackDraft(null);
 
-      const res = await fetch(`${API_BASE}/projects/generate-tasks`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ownerEmail,
-          projectTitle,
-          projectDescription,
-        }),
+      const estimationResult = await mutate({
+        ownerEmail,
+        projectTitle,
+        projectDescription,
       });
 
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        console.error('[generator] Error HTTP generando tareas', res.status, data);
-
-        if (res.status === 402 && (data as any)?.error === 'subscription_required') {
-          setError(
-            (data as any).message ??
-              'Necesitas una suscripción activa de 30 €/mes para usar el generador.'
-          );
-          return;
-        }
-
-        throw new Error((data as any).error || 'No se pudo generar el troceado de tareas');
+      if (!estimationResult) {
+        setError(mutationError || 'No se pudo generar el troceado de tareas');
+        return;
       }
 
-      const data = (await res.json()) as { project: ProjectEstimation };
-
-      const proj = data.project;
       const fixed: ProjectEstimation = {
-        ...proj,
-        platformFeePercent: safeNumber(proj.platformFeePercent) > 0 ? proj.platformFeePercent : 1,
+        ...estimationResult,
+        platformFeePercent:
+          safeNumber(estimationResult.platformFeePercent) > 0
+            ? estimationResult.platformFeePercent
+            : 1,
       };
 
       setEstimation(fixed);
+      setStackDraft(estimationResult.recommendedStack ?? null);
     } catch (err: any) {
       console.error('[generator] Error generando tareas', err);
       setError(err.message || 'No se pudo generar el troceado de tareas. Inténtalo de nuevo.');
@@ -428,22 +383,27 @@ export default function GeneratorPage() {
         ownerEmail: ownerEmailResolved,
         projectTitle: projectTitleResolved,
         projectDescription: projectDescriptionResolved,
-        platformFeePercent,
-        totalTasksPrice,
-        platformFeeAmount,
-        grandTotalClientCost,
-      };
+            platformFeePercent,
+            totalTasksPrice,
+            platformFeeAmount,
+            grandTotalClientCost,
+          };
 
-      const res = await fetch(`${API_BASE}/community/projects`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+        const res = await fetch(`${API_BASE}/community/projects`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
           ownerEmail: ownerEmailResolved,
           projectTitle: projectTitleResolved,
           projectDescription: projectDescriptionResolved,
-          estimation: estimationPayload,
-        }),
-      });
+          estimation: {
+            ...estimationPayload,
+            recommendedStack: stackDraft ?? estimation?.recommendedStack,
+            stackSource: estimation?.stackSource,
+            stackConfidence: estimation?.stackConfidence,
+          },
+          }),
+        });
 
       const data = await res.json().catch(() => ({} as any));
 
@@ -565,6 +525,13 @@ export default function GeneratorPage() {
             <p className="mt-3 text-xs text-slate-500">
               La plataforma actúa como intermediaria entre el cliente y los programadores. El presupuesto mostrado incluye un 1% de comisión de plataforma. El generador se paga mediante suscripción mensual, no se añade fee extra por proyecto.
             </p>
+
+            <RecommendedStackPanel
+              value={stackDraft ?? estimation.recommendedStack}
+              source={estimation.stackSource}
+              confidence={estimation.stackConfidence}
+              onChange={(next) => setStackDraft(next)}
+            />
 
             <div className="mt-5 overflow-x-auto">
               <table className="min-w-full text-left text-sm">

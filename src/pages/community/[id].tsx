@@ -77,6 +77,19 @@ type TechnicalChecklistGroup = {
   items: TechnicalChecklistItem[];
 };
 
+type RecommendedStack = {
+  frontend?: string[];
+  backend?: string[];
+  smartContracts?: string[];
+  database?: string[];
+  infra?: string[];
+  testing?: string[];
+  devops?: string[];
+  notes?: string[];
+};
+
+type StackSource = 'HEURISTIC' | 'OPENAI';
+
 interface BoardProject {
   id: string;
   title: string;
@@ -88,6 +101,9 @@ interface BoardProject {
 
   // ✅ NUEVO
   technicalChecklist?: TechnicalChecklistGroup[];
+  recommendedStack?: RecommendedStack;
+  stackSource?: StackSource | null;
+  stackConfidence?: number | null;
 }
 
 interface BoardResponse {
@@ -95,6 +111,9 @@ interface BoardResponse {
   columns: BoardColumn[];
   tasks: BoardTask[];
   repoJoined?: boolean | null;
+  recommendedStack?: RecommendedStack;
+  stackSource?: StackSource | null;
+  stackConfidence?: number | null;
 
   // ✅ NUEVO (por si lo devuelves a nivel raíz)
   technicalChecklist?: TechnicalChecklistGroup[];
@@ -274,6 +293,16 @@ const normalizeTechnicalChecklist = (raw: unknown): TechnicalChecklistGroup[] =>
     .filter(Boolean) as TechnicalChecklistGroup[];
 };
 
+const STACK_CATEGORIES: { key: keyof RecommendedStack; label: string }[] = [
+  { key: 'frontend', label: 'Frontend' },
+  { key: 'backend', label: 'Backend' },
+  { key: 'smartContracts', label: 'Smart Contracts' },
+  { key: 'database', label: 'DB' },
+  { key: 'infra', label: 'Infra' },
+  { key: 'testing', label: 'Testing' },
+  { key: 'devops', label: 'DevOps' },
+];
+
 // ✅ URL login GitHub con returnTo a esta página
 const buildGithubLoginUrl = (userEmail: string, projectId: string) => {
   return (
@@ -448,6 +477,17 @@ function CommunityProjectCard(props: {
     actionError,
   } = props;
 
+  const stackSourceLabel =
+    project.stackSource === 'OPENAI'
+      ? 'Origen: IA'
+      : project.stackSource === 'HEURISTIC'
+        ? 'Origen: Heurístico'
+        : null;
+
+  const hasStack =
+    project.recommendedStack &&
+    STACK_CATEGORIES.some((c) => Array.isArray(project.recommendedStack?.[c.key]) && (project.recommendedStack?.[c.key] as string[]).length > 0);
+
   return (
     <div className="rounded-2xl bg-white p-6 shadow-sm">
       <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
@@ -492,6 +532,57 @@ function CommunityProjectCard(props: {
             Estás viendo tu propio proyecto. Puedes aprobar o rechazar tareas en revisión y gestionar el tablero sin
             unirte al repositorio.
           </p>
+        )}
+      </div>
+
+      <div className="mt-4 space-y-3 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="text-sm font-semibold text-slate-900">Stack sugerido</p>
+          <div className="flex items-center gap-2 text-xs text-slate-500">
+            {stackSourceLabel && <span>{stackSourceLabel}</span>}
+            {typeof project.stackConfidence === 'number' && !Number.isNaN(project.stackConfidence) && (
+              <span className="rounded-full bg-white px-2 py-1 ring-1 ring-slate-200">
+                Conf: {project.stackConfidence.toFixed(2)}
+              </span>
+            )}
+          </div>
+        </div>
+
+        {hasStack ? (
+          <div className="grid gap-3 md:grid-cols-2">
+            {STACK_CATEGORIES.map((cat) => {
+              const items = Array.isArray(project.recommendedStack?.[cat.key])
+                ? (project.recommendedStack?.[cat.key] as string[])
+                : [];
+              return (
+                <div
+                  key={cat.key}
+                  className="space-y-2 rounded-xl bg-white p-3 shadow-sm ring-1 ring-slate-200"
+                >
+                  <div className="flex items-center justify-between text-sm font-semibold text-slate-900">
+                    <span>{cat.label}</span>
+                    <span className="text-xs font-normal text-slate-500">Lectura</span>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {items.length ? (
+                      items.map((item, idx) => (
+                        <span
+                          key={`${cat.key}-${idx}-${item}`}
+                          className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-800"
+                        >
+                          {item}
+                        </span>
+                      ))
+                    ) : (
+                      <span className="text-xs text-slate-400">Sin datos</span>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <p className="text-sm text-slate-500">No disponible.</p>
         )}
       </div>
 
@@ -846,9 +937,29 @@ export default function CommunityProjectBoard() {
           (data.project as any)?.technicalChecklist ??
           (data.project as any)?.estimation?.technicalChecklist;
 
+        const recommendedStack =
+          (data as any).recommendedStack ??
+          (data.project as any)?.recommendedStack ??
+          (data.project as any)?.estimation?.recommendedStack;
+
+        const stackSource =
+          (data as any).stackSource ??
+          (data.project as any)?.stackSource ??
+          (data.project as any)?.estimation?.stackSource ??
+          null;
+
+        const stackConfidence =
+          (data as any).stackConfidence ??
+          (data.project as any)?.stackConfidence ??
+          (data.project as any)?.estimation?.stackConfidence ??
+          null;
+
         const projectWithTech: BoardProject = {
           ...data.project,
           technicalChecklist: normalizeTechnicalChecklist(techRaw),
+          recommendedStack,
+          stackSource: stackSource as StackSource | null,
+          stackConfidence: typeof stackConfidence === 'number' ? stackConfidence : null,
         };
 
         setProject(projectWithTech);
