@@ -3,6 +3,10 @@ import { useEffect, useMemo, useState } from 'react';
 import { useSession } from 'next-auth/react';
 import { useRouter } from 'next/router';
 import Link from 'next/link';
+import RecommendedStackPanel, {
+  RecommendedStack,
+  normalizeRecommendedStack,
+} from '@/components/RecommendedStackPanel';
 
 const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:4000';
 
@@ -46,6 +50,19 @@ export interface ProjectEstimation {
   generatorFee?: number;
   grandTotalClientCost: number;
   published?: boolean;
+  stackRecommended?: RecommendedStack;
+  recommendedStack?: RecommendedStack;
+  stackInferred?: RecommendedStack;
+  stackInferredReasons?: string[];
+  stackSignals?: string[];
+  stackMissing?: Record<string, unknown>;
+  stackInference?: {
+    inferred?: RecommendedStack;
+    suggested?: RecommendedStack;
+    reasons?: string[];
+    signals?: string[];
+    missing?: Record<string, unknown>;
+  };
 }
 
 const formatPrice = (value: number) =>
@@ -93,6 +110,7 @@ type GeneratorDraft = {
   projectDescription: string;
   ownerEmail: string;
   estimation: ProjectEstimation | null;
+  stackDraft?: RecommendedStack | null;
   ts: number;
 };
 
@@ -153,6 +171,7 @@ export default function GeneratorPage() {
   const [projectDescription, setProjectDescription] = useState('');
   const [ownerEmail, setOwnerEmail] = useState('');
   const [estimation, setEstimation] = useState<ProjectEstimation | null>(null);
+  const [stackDraft, setStackDraft] = useState<RecommendedStack | null>(null);
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -192,6 +211,16 @@ export default function GeneratorPage() {
       setProjectDescription(draft.projectDescription || '');
       setOwnerEmail(draft.ownerEmail || session?.user?.email || '');
       setEstimation(draft.estimation || null);
+      setStackDraft(
+        draft.stackDraft ??
+          (draft.estimation
+            ? normalizeRecommendedStack(
+                draft.estimation.stackRecommended ??
+                  draft.estimation.recommendedStack ??
+                  draft.estimation.stackInference?.suggested
+              )
+            : null)
+      );
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [router.isReady]);
@@ -202,7 +231,8 @@ export default function GeneratorPage() {
       (projectTitle && projectTitle.trim() !== '') ||
       (projectDescription && projectDescription.trim() !== '') ||
       (ownerEmail && ownerEmail.trim() !== '') ||
-      !!estimation;
+      !!estimation ||
+      !!stackDraft;
 
     if (!hasSomething) return;
 
@@ -211,9 +241,10 @@ export default function GeneratorPage() {
       projectDescription,
       ownerEmail,
       estimation,
+      stackDraft,
       ts: Date.now(),
     });
-  }, [projectTitle, projectDescription, ownerEmail, estimation]);
+  }, [projectTitle, projectDescription, ownerEmail, estimation, stackDraft]);
 
   const fetchGithubStatus = async () => {
     if (!githubStatusEmail) {
@@ -280,14 +311,15 @@ export default function GeneratorPage() {
       projectDescription,
       ownerEmail,
       estimation,
+      stackDraft,
       ts: Date.now(),
     });
 
     const url =
       `${API_BASE}/integrations/github/login` +
       `?userEmail=${encodeURIComponent(githubStatusEmail)}` +
-  `&returnTo=${encodeURIComponent('/tools/generator')}` +
-  `&popup=1`;
+      `&returnTo=${encodeURIComponent('/tools/generator')}` +
+      `&popup=1`;
 
     const popup = openCenteredPopup(url);
 
@@ -350,12 +382,57 @@ export default function GeneratorPage() {
     return +(totalTasksPrice + platformFeeAmount).toFixed(2);
   }, [estimation?.grandTotalClientCost, totalTasksPrice, platformFeeAmount]);
 
+  const inferredStack = useMemo(
+    () =>
+      estimation
+        ? normalizeRecommendedStack(
+            estimation.stackInferred ?? estimation.stackInference?.inferred ?? null
+          )
+        : {},
+    [estimation]
+  );
+
+  const recommendedStackFromEstimation = useMemo(
+    () =>
+      estimation
+        ? normalizeRecommendedStack(
+            estimation.stackRecommended ??
+              estimation.recommendedStack ??
+              estimation.stackInference?.suggested ??
+              null
+          )
+        : {},
+    [estimation]
+  );
+
+  const inferredReasons = useMemo(() => {
+    const reasonsRaw =
+      estimation?.stackInferredReasons ??
+      estimation?.stackInference?.reasons ??
+      estimation?.stackSignals;
+
+    if (!Array.isArray(reasonsRaw)) return [];
+
+    return reasonsRaw
+      .map((item) => (typeof item === 'string' ? item.trim() : ''))
+      .filter(Boolean);
+  }, [estimation]);
+
+  useEffect(() => {
+    if (!estimation) return;
+    setStackDraft((prev) => {
+      if (prev) return prev;
+      return recommendedStackFromEstimation;
+    });
+  }, [estimation, recommendedStackFromEstimation]);
+
   const handleGenerateTasks = async () => {
     try {
       setLoading(true);
       setError(null);
       setPublishError(null);
       setEstimation(null);
+      setStackDraft(null);
 
       const res = await fetch(`${API_BASE}/projects/generate-tasks`, {
         method: 'POST',
@@ -391,6 +468,11 @@ export default function GeneratorPage() {
       };
 
       setEstimation(fixed);
+      setStackDraft(
+        normalizeRecommendedStack(
+          fixed.stackRecommended ?? fixed.recommendedStack ?? fixed.stackInference?.suggested
+        )
+      );
     } catch (err: any) {
       console.error('[generator] Error generando tareas', err);
       setError(err.message || 'No se pudo generar el troceado de tareas. Inténtalo de nuevo.');
@@ -432,6 +514,8 @@ export default function GeneratorPage() {
         totalTasksPrice,
         platformFeeAmount,
         grandTotalClientCost,
+        recommendedStack: normalizeRecommendedStack(stackDraft ?? recommendedStackFromEstimation),
+        stackRecommended: normalizeRecommendedStack(stackDraft ?? recommendedStackFromEstimation),
       };
 
       const res = await fetch(`${API_BASE}/community/projects`, {
@@ -566,6 +650,20 @@ export default function GeneratorPage() {
               La plataforma actúa como intermediaria entre el cliente y los programadores. El presupuesto mostrado incluye un 1% de comisión de plataforma. El generador se paga mediante suscripción mensual, no se añade fee extra por proyecto.
             </p>
 
+            <div className="mt-5 grid gap-4 md:grid-cols-2">
+              <RecommendedStackPanel
+                title="Stack inferido"
+                readOnly
+                value={inferredStack}
+                reasons={inferredReasons}
+              />
+              <RecommendedStackPanel
+                title="Stack recomendado"
+                value={stackDraft ?? recommendedStackFromEstimation}
+                onChange={setStackDraft}
+              />
+            </div>
+
             <div className="mt-5 overflow-x-auto">
               <table className="min-w-full text-left text-sm">
                 <thead>
@@ -581,7 +679,7 @@ export default function GeneratorPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {estimation.tasks.map((task, index) => (
+                  {(estimation.tasks ?? []).map((task, index) => (
                     <tr key={task.id ?? index} className="border-b border-slate-100 align-top">
                       <td className="px-4 py-2 font-semibold text-slate-900">{task.title}</td>
                       <td className="px-4 py-2 text-slate-700">{task.description}</td>
