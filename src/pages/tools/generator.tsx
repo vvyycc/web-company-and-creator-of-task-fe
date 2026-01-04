@@ -1,4 +1,9 @@
 // src/pages/tools/generator.tsx
+import RecommendedStackPanel, {
+  DEFAULT_STACK_SECTIONS,
+  RecommendedStack,
+  StackSection,
+} from '@/components/RecommendedStackPanel';
 import { useEffect, useMemo, useState } from 'react';
 import { useSession } from 'next-auth/react';
 import { useRouter } from 'next/router';
@@ -32,13 +37,20 @@ export interface GeneratedTask {
   assigneeAvatar?: string | null;
 }
 
+export type StackInference = {
+  inferred?: RecommendedStack | null;
+  suggested?: RecommendedStack | null;
+  reasons?: string;
+  confidence?: number | null;
+};
+
 export interface ProjectEstimation {
   id?: string;
   projectTitle: string;
   projectDescription: string;
   ownerEmail: string;
   tasks: GeneratedTask[];
-  totalHours: number;
+  totalHours?: number;
   totalTasksPrice: number;
   platformFeePercent: number;
   platformFeeAmount: number;
@@ -46,6 +58,11 @@ export interface ProjectEstimation {
   generatorFee?: number;
   grandTotalClientCost: number;
   published?: boolean;
+  recommendedStack?: RecommendedStack;
+  stackInference?: StackInference | null;
+  stackSource?: string | null;
+  stackConfidence?: number | null;
+  openaiMeta?: unknown;
 }
 
 const formatPrice = (value: number) =>
@@ -93,6 +110,8 @@ type GeneratorDraft = {
   projectDescription: string;
   ownerEmail: string;
   estimation: ProjectEstimation | null;
+  stackDraft?: RecommendedStack;
+  stackInference?: StackInference | null;
   ts: number;
 };
 
@@ -145,6 +164,145 @@ function openCenteredPopup(url: string) {
   return popup;
 }
 
+const STACK_SECTIONS: StackSection[] = DEFAULT_STACK_SECTIONS;
+
+const ensureStringArray = (value: unknown): string[] => {
+  if (!value) return [];
+  if (Array.isArray(value)) return value.map((item) => String(item).trim()).filter(Boolean);
+  if (typeof value === 'string') {
+    return value
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+  return [];
+};
+
+const normalizeRecommendedStack = (stack?: RecommendedStack | null): RecommendedStack => {
+  const base = STACK_SECTIONS.reduce((acc, section) => {
+    acc[section.key] = [];
+    return acc;
+  }, {} as RecommendedStack);
+
+  if (!stack) return base;
+
+  const normalized: RecommendedStack = { ...base };
+
+  Object.entries(stack).forEach(([key, value]) => {
+    normalized[key] = ensureStringArray(value);
+  });
+
+  return normalized;
+};
+
+const normalizeStackInference = (inference?: StackInference | null): StackInference | null => {
+  if (!inference) return null;
+  return {
+    ...inference,
+    inferred: normalizeRecommendedStack(inference.inferred ?? undefined),
+    suggested: normalizeRecommendedStack(inference.suggested ?? undefined),
+    confidence:
+      typeof inference.confidence === 'number'
+        ? inference.confidence
+        : Number(inference.confidence) || null,
+  };
+};
+
+const mergeSectionsWithStack = (stack: RecommendedStack, baseSections: StackSection[]) => {
+  const knownKeys = new Set(baseSections.map((s) => s.key));
+  const dynamicSections = Object.keys(stack || {})
+    .filter((key) => !knownKeys.has(key))
+    .map((key) => ({ key, label: key }));
+
+  return [...baseSections, ...dynamicSections];
+};
+
+const hasStackItems = (stack?: RecommendedStack | null) =>
+  !!stack && Object.values(stack).some((items) => Array.isArray(items) && items.length > 0);
+
+const formatConfidence = (value?: number | null) => {
+  if (value === null || value === undefined || Number.isNaN(value)) return null;
+  const normalized = value <= 1 ? value * 100 : value;
+  return `${normalized.toFixed(0)}%`;
+};
+
+const GENERATE_PATHS = [
+  process.env.NEXT_PUBLIC_GENERATE_TASKS_PATH,
+  '/projects/generate-tasks',
+  '/generate-tasks',
+].filter(Boolean) as string[];
+
+function StackSummaryCard({
+  title,
+  description,
+  stack,
+  sections,
+  source,
+  confidence,
+}: {
+  title: string;
+  description?: string;
+  stack: RecommendedStack;
+  sections: StackSection[];
+  source?: string | null;
+  confidence?: number | null;
+}) {
+  const hasContent = hasStackItems(stack);
+  const confidenceLabel = formatConfidence(confidence);
+
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white/70 p-4 shadow-sm">
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-wide text-blue-600">{title}</p>
+          {description && <p className="mt-1 text-sm text-slate-600">{description}</p>}
+          <div className="mt-2 flex flex-wrap gap-2 text-xs text-slate-600">
+            <span className="rounded-full bg-slate-100 px-2 py-1">
+              Origen: {source || 'OPENAI/HEURISTIC'}
+            </span>
+            {confidenceLabel && (
+              <span className="rounded-full bg-slate-100 px-2 py-1">
+                Confianza: {confidenceLabel}
+              </span>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-4 grid gap-3 sm:grid-cols-2">
+        {hasContent ? (
+          sections.map((section) => {
+            const items = stack[section.key] || [];
+            if (!items.length) return null;
+
+            return (
+              <div key={section.key} className="space-y-2 rounded-lg bg-slate-50/80 p-3">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-700">
+                  {section.label}
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  {items.map((tech) => (
+                    <span
+                      key={`${section.key}-${tech}`}
+                      className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-800 shadow-sm"
+                    >
+                      {tech}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            );
+          })
+        ) : (
+          <p className="text-sm text-slate-600">
+            No se pudo inferir el stack. Comprueba la descripción o prueba de nuevo (el backend también aporta un stack sugerido).
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function GeneratorPage() {
   const router = useRouter();
   const { data: session } = useSession();
@@ -153,6 +311,9 @@ export default function GeneratorPage() {
   const [projectDescription, setProjectDescription] = useState('');
   const [ownerEmail, setOwnerEmail] = useState('');
   const [estimation, setEstimation] = useState<ProjectEstimation | null>(null);
+  const [stackDraft, setStackDraft] = useState<RecommendedStack>(normalizeRecommendedStack());
+  const [stackInference, setStackInference] = useState<StackInference | null>(null);
+  const [openAiMeta, setOpenAiMeta] = useState<unknown>(null);
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -192,6 +353,8 @@ export default function GeneratorPage() {
       setProjectDescription(draft.projectDescription || '');
       setOwnerEmail(draft.ownerEmail || session?.user?.email || '');
       setEstimation(draft.estimation || null);
+      if (draft.stackDraft) setStackDraft(normalizeRecommendedStack(draft.stackDraft));
+      if (draft.stackInference) setStackInference(normalizeStackInference(draft.stackInference));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [router.isReady]);
@@ -211,9 +374,11 @@ export default function GeneratorPage() {
       projectDescription,
       ownerEmail,
       estimation,
+      stackDraft,
+      stackInference,
       ts: Date.now(),
     });
-  }, [projectTitle, projectDescription, ownerEmail, estimation]);
+  }, [projectTitle, projectDescription, ownerEmail, estimation, stackDraft, stackInference]);
 
   const fetchGithubStatus = async () => {
     if (!githubStatusEmail) {
@@ -356,22 +521,46 @@ export default function GeneratorPage() {
       setError(null);
       setPublishError(null);
       setEstimation(null);
+      setStackDraft(normalizeRecommendedStack());
+      setStackInference(null);
+      setOpenAiMeta(null);
 
-      const res = await fetch(`${API_BASE}/projects/generate-tasks`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ownerEmail,
-          projectTitle,
-          projectDescription,
-        }),
-      });
+      let finalResponse: Response | null = null;
 
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        console.error('[generator] Error HTTP generando tareas', res.status, data);
+      for (const path of GENERATE_PATHS) {
+        const url = `${API_BASE}${path.startsWith('/') ? '' : '/'}${path}`;
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ownerEmail,
+            projectTitle,
+            projectDescription,
+          }),
+        });
 
-        if (res.status === 402 && (data as any)?.error === 'subscription_required') {
+        if (res.ok) {
+          finalResponse = res;
+          break;
+        }
+
+        if (res.status === 404) {
+          continue;
+        }
+
+        finalResponse = res;
+        break;
+      }
+
+      if (!finalResponse) {
+        throw new Error('No se pudo contactar con el generador de tareas.');
+      }
+
+      if (!finalResponse.ok) {
+        const data = await finalResponse.json().catch(() => ({}));
+        console.error('[generator] Error HTTP generando tareas', finalResponse.status, data);
+
+        if (finalResponse.status === 402 && (data as any)?.error === 'subscription_required') {
           setError(
             (data as any).message ??
               'Necesitas una suscripción activa de 30 €/mes para usar el generador.'
@@ -382,14 +571,25 @@ export default function GeneratorPage() {
         throw new Error((data as any).error || 'No se pudo generar el troceado de tareas');
       }
 
-      const data = (await res.json()) as { project: ProjectEstimation };
+      const data = (await finalResponse.json()) as { project: ProjectEstimation };
 
       const proj = data.project;
+      const normalizedInference = normalizeStackInference(proj.stackInference);
+      const normalizedRecommendedStack = normalizeRecommendedStack(
+        proj.recommendedStack ?? normalizedInference?.suggested ?? null
+      );
+
       const fixed: ProjectEstimation = {
         ...proj,
+        tasks: Array.isArray(proj.tasks) ? proj.tasks : [],
         platformFeePercent: safeNumber(proj.platformFeePercent) > 0 ? proj.platformFeePercent : 1,
+        recommendedStack: normalizedRecommendedStack,
+        stackInference: normalizedInference,
       };
 
+      setStackDraft(normalizedRecommendedStack);
+      setStackInference(normalizedInference);
+      setOpenAiMeta((proj as any)?.openaiMeta ?? null);
       setEstimation(fixed);
     } catch (err: any) {
       console.error('[generator] Error generando tareas', err);
@@ -428,6 +628,8 @@ export default function GeneratorPage() {
         ownerEmail: ownerEmailResolved,
         projectTitle: projectTitleResolved,
         projectDescription: projectDescriptionResolved,
+        recommendedStack: stackDraft,
+        stackInference,
         platformFeePercent,
         totalTasksPrice,
         platformFeeAmount,
@@ -478,6 +680,41 @@ export default function GeneratorPage() {
       setPublishing(false);
     }
   };
+
+  useEffect(() => {
+    if (!estimation) return;
+
+    if (estimation.recommendedStack || estimation.stackInference?.suggested) {
+      setStackDraft(
+        normalizeRecommendedStack(
+          estimation.recommendedStack ?? estimation.stackInference?.suggested ?? null
+        )
+      );
+    }
+
+    if (estimation.stackInference) {
+      setStackInference(normalizeStackInference(estimation.stackInference));
+    }
+
+    if ((estimation as any)?.openaiMeta) {
+      setOpenAiMeta((estimation as any).openaiMeta);
+    }
+  }, [estimation]);
+
+  const stackSource = estimation?.stackSource || 'OPENAI/HEURISTIC';
+  const stackConfidence = estimation?.stackConfidence ?? stackInference?.confidence;
+
+  const inferenceStack = normalizeRecommendedStack(stackInference?.inferred ?? undefined);
+  const suggestedSections = useMemo(
+    () => mergeSectionsWithStack(stackDraft, STACK_SECTIONS),
+    [stackDraft]
+  );
+  const inferenceSections = useMemo(
+    () => mergeSectionsWithStack(inferenceStack, STACK_SECTIONS),
+    [inferenceStack]
+  );
+
+  const tasksToRender = Array.isArray(estimation?.tasks) ? estimation.tasks : [];
 
   return (
     <main className="min-h-screen bg-slate-50 p-6">
@@ -566,7 +803,45 @@ export default function GeneratorPage() {
               La plataforma actúa como intermediaria entre el cliente y los programadores. El presupuesto mostrado incluye un 1% de comisión de plataforma. El generador se paga mediante suscripción mensual, no se añade fee extra por proyecto.
             </p>
 
-            <div className="mt-5 overflow-x-auto">
+            <div className="mt-5 grid gap-4 md:grid-cols-2">
+              <StackSummaryCard
+                title="Stack inferido"
+                description="Tecnologías detectadas explícitamente en la descripción y el paradigma."
+                stack={inferenceStack}
+                sections={inferenceSections}
+                source={stackSource}
+                confidence={stackConfidence}
+              />
+
+              <RecommendedStackPanel
+                title="Stack sugerido"
+                subtitle="Stack completo recomendado para el MVP (puedes ajustar las tecnologías)."
+                stack={stackDraft}
+                onChange={setStackDraft}
+                sections={suggestedSections}
+              />
+            </div>
+
+            {process.env.NODE_ENV !== 'production' && (stackInference || openAiMeta) && (
+              <details className="mt-3 rounded-lg border border-dashed border-slate-200 bg-slate-50/80 p-3 text-xs text-slate-700">
+                <summary className="cursor-pointer text-sm font-semibold text-slate-800">
+                  Ver detalle de stack (solo dev)
+                </summary>
+                <pre className="mt-2 whitespace-pre-wrap break-words text-[11px] leading-tight">
+                  {JSON.stringify(
+                    {
+                      stackInference,
+                      recommendedStack: stackDraft,
+                      openAiMeta,
+                    },
+                    null,
+                    2
+                  )}
+                </pre>
+              </details>
+            )}
+
+            <div className="mt-6 overflow-x-auto">
               <table className="min-w-full text-left text-sm">
                 <thead>
                   <tr className="border-b border-slate-200 bg-slate-50 text-xs font-semibold text-slate-700">
@@ -581,7 +856,7 @@ export default function GeneratorPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {estimation.tasks.map((task, index) => (
+                  {tasksToRender.map((task, index) => (
                     <tr key={task.id ?? index} className="border-b border-slate-100 align-top">
                       <td className="px-4 py-2 font-semibold text-slate-900">{task.title}</td>
                       <td className="px-4 py-2 text-slate-700">{task.description}</td>
