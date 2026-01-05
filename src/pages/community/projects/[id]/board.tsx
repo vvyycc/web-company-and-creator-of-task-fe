@@ -7,14 +7,34 @@ import { useProjectSocket } from '@/hooks/useProjectSocket';
 
 type ColumnId = string;
 
+type RepoType = 'backend' | 'frontend' | 'contracts' | 'mono';
+
+type RepoStatusState = 'NONE' | 'INVITED' | 'ACTIVE';
+
+type ProjectRepo = {
+  type: RepoType;
+  fullName: string;
+  htmlUrl: string;
+};
+
+type RepoStatus = {
+  type: RepoType;
+  repoFullName?: string;
+  repoUrl?: string;
+  state: RepoStatusState;
+};
+
 type BoardTask = {
   _id?: string;
   id?: string;
   title: string;
   description?: string;
+  layer?: string;
   columnId?: ColumnId;
   status?: ColumnId;
   priority?: number;
+  repoType?: RepoType;
+  repo?: { repoFullName?: string; repoUrl?: string; type?: RepoType };
   assigneeName?: string;
   assigneeEmail?: string;
   assignedToEmail?: string;
@@ -35,12 +55,14 @@ type BoardResponse = {
   columns: BoardColumn[];
   tasks?: BoardTask[];
   project?: CommunityProject;
+  projectRepos?: ProjectRepo[];
 };
 
 type CommunityProject = {
   id: string;
   title: string;
   ownerEmail?: string;
+  projectRepos?: ProjectRepo[];
 };
 
 type NoteModalProps = {
@@ -139,6 +161,17 @@ export default function CommunityProjectBoardPage() {
   } | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [projectRepos, setProjectRepos] = useState<ProjectRepo[]>([]);
+  const [repoStatusByType, setRepoStatusByType] = useState<Partial<Record<RepoType, RepoStatus>>>(
+    {}
+  );
+  const [joiningRepoType, setJoiningRepoType] = useState<RepoType | null>(null);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  const showToast = useCallback((message: string) => {
+    setToastMessage(message);
+    setTimeout(() => setToastMessage(null), 3500);
+  }, []);
 
   const resolveColumnId = useCallback((task: BoardTask) => {
     if (!task) return '';
@@ -157,6 +190,64 @@ export default function CommunityProjectBoardPage() {
     if (!task) return '';
     return task._id || task.id || '';
   }, []);
+
+  const repoTypeLabels: Record<RepoType, string> = useMemo(
+    () => ({
+      backend: 'Backend',
+      frontend: 'Frontend',
+      contracts: 'Contracts',
+      mono: 'Monorepo',
+    }),
+    []
+  );
+
+  const resolveRepoType = useCallback((task: BoardTask): RepoType | undefined => {
+    if (!task) return undefined;
+    const explicit = task.repoType || task.repo?.type;
+    if (explicit) return explicit;
+
+    const repoFullName = task.repo?.repoFullName;
+    if (repoFullName && repoFullName.includes('-contracts')) {
+      return 'contracts';
+    }
+
+    if (task.layer?.toUpperCase() === 'VIEW') {
+      return 'frontend';
+    }
+
+    return 'backend';
+  }, []);
+
+  const canWorkOnTask = useCallback(
+    (task: BoardTask) => {
+      const repoType = resolveRepoType(task);
+      if (!repoType) return true;
+      return repoStatusByType[repoType]?.state === 'ACTIVE';
+    },
+    [repoStatusByType, resolveRepoType]
+  );
+
+  const handleRepoAccessError = useCallback(
+    (payload?: { repoType?: RepoType; state?: RepoStatusState; repoFullName?: string; repoUrl?: string }) => {
+      const repoType = payload?.repoType;
+
+      if (repoType && payload?.state) {
+        setRepoStatusByType((prev) => ({
+          ...prev,
+          [repoType]: {
+            type: repoType,
+            state: payload.state,
+            repoFullName: payload.repoFullName,
+            repoUrl: payload.repoUrl,
+          },
+        }));
+      }
+
+      const label = repoType ? repoTypeLabels[repoType] || repoType : 'del proyecto';
+      showToast(`Debes unirte al repositorio ${label} para mover esta tarea`);
+    },
+    [repoTypeLabels, showToast]
+  );
 
   const normalizeColumns = useCallback((rawColumns: BoardColumn[]) =>
     rawColumns.map((column) => ({
@@ -213,6 +304,16 @@ export default function CommunityProjectBoardPage() {
     return grouped;
   }, [columns, resolveColumnId, tasks]);
 
+  const orderedProjectRepos = useMemo(
+    () => {
+      const types: RepoType[] = ['backend', 'frontend', 'contracts'];
+      return types
+        .map((type) => projectRepos.find((repo) => repo.type === type))
+        .filter(Boolean) as ProjectRepo[];
+    },
+    [projectRepos]
+  );
+
   useEffect(() => {
     if (!router.isReady || !projectId) return;
 
@@ -247,9 +348,19 @@ export default function CommunityProjectBoardPage() {
           (data as BoardResponse).tasks
         );
 
-        if ((data as BoardResponse).project) {
-          setProject((data as BoardResponse).project || null);
+        const boardProject = (data as BoardResponse).project || null;
+        const reposFromBoard =
+          (data as BoardResponse).projectRepos ||
+          boardProject?.projectRepos ||
+          [];
+
+        if (boardProject) {
+          setProject({ ...boardProject, projectRepos: reposFromBoard });
+        } else if (reposFromBoard?.length) {
+          setProject((prev) => (prev ? { ...prev, projectRepos: reposFromBoard } : prev));
         }
+
+        setProjectRepos(Array.isArray(reposFromBoard) ? reposFromBoard : []);
 
         setColumns(normalizedColumns);
         setTasks(normalizedTasks);
@@ -272,7 +383,12 @@ export default function CommunityProjectBoardPage() {
         const res = await fetch(`${API_BASE}/community/projects/${projectId}`);
         if (res.ok) {
           const data = await res.json();
-          setProject(data.project ?? data ?? null);
+          const nextProject = data.project ?? data ?? null;
+          const reposFromProject = nextProject?.projectRepos;
+          if (reposFromProject?.length) {
+            setProjectRepos(reposFromProject);
+          }
+          setProject(nextProject);
         }
       } catch (err) {
         console.error('[community] Error fetching project metadata', err);
@@ -281,6 +397,34 @@ export default function CommunityProjectBoardPage() {
 
     fetchProject();
   }, [API_BASE, project?.ownerEmail, projectId, router.isReady]);
+
+  useEffect(() => {
+    if (!router.isReady || !projectId || !session?.user?.email) return;
+
+    const fetchRepoStatus = async () => {
+      try {
+        const res = await fetch(
+          `${API_BASE}/community/projects/${projectId}/repos/status?userEmail=${encodeURIComponent(
+            session.user.email || ''
+          )}`
+        );
+        if (!res.ok) return;
+        const data: { repos?: RepoStatus[] } = await res.json();
+        if (Array.isArray(data.repos)) {
+          setRepoStatusByType(
+            data.repos.reduce<Partial<Record<RepoType, RepoStatus>>>((acc, repo) => {
+              acc[repo.type] = repo;
+              return acc;
+            }, {})
+          );
+        }
+      } catch (err) {
+        console.error('[community] Error fetching repo status', err);
+      }
+    };
+
+    fetchRepoStatus();
+  }, [API_BASE, projectId, router.isReady, session?.user?.email]);
 
   const moveTaskLocally = useCallback(
     (taskId: string, targetColumnId: string) => {
@@ -296,30 +440,44 @@ export default function CommunityProjectBoardPage() {
   );
 
   const persistTaskMove = useCallback(
-    async (taskId: string, targetColumnId: string) => {
+    async (taskId: string, targetColumnId: string, previousColumnId?: string) => {
       try {
-        await fetch(`${API_BASE}/community/tasks/${taskId}`, {
+        const res = await fetch(`${API_BASE}/community/tasks/${taskId}`, {
           method: 'PATCH',
           headers: {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({ columnId: targetColumnId, status: targetColumnId }),
         });
+
+        if (!res.ok) {
+          const payload = await res.json().catch(() => ({}));
+          if (res.status === 403 && payload?.error === 'repo_access_required') {
+            handleRepoAccessError(payload);
+          }
+          throw new Error(payload?.message || 'No se pudo mover la tarea.');
+        }
       } catch (err) {
         console.error('[community] Error actualizando tarea', err);
+        if (previousColumnId) {
+          moveTaskLocally(taskId, previousColumnId);
+        }
       }
     },
-    [API_BASE]
+    [API_BASE, handleRepoAccessError, moveTaskLocally]
   );
 
   const handleDropOnColumn = useCallback(
     (columnId: string) => {
       if (!draggedTaskId) return;
+      const originalTask = tasks.find((task) => resolveTaskId(task) === draggedTaskId);
+      const previousColumnId = originalTask ? resolveColumnId(originalTask) : undefined;
+
       moveTaskLocally(draggedTaskId, columnId);
-      persistTaskMove(draggedTaskId, columnId);
+      persistTaskMove(draggedTaskId, columnId, previousColumnId);
       setDraggedTaskId(null);
     },
-    [draggedTaskId, moveTaskLocally, persistTaskMove]
+    [draggedTaskId, moveTaskLocally, persistTaskMove, resolveColumnId, resolveTaskId, tasks]
   );
 
   const handleSocketEvent = useCallback(
@@ -343,6 +501,50 @@ export default function CommunityProjectBoardPage() {
   );
 
   useProjectSocket(projectId, handleSocketEvent);
+
+  const handleJoinRepo = useCallback(
+    async (type: RepoType) => {
+      if (!projectId || !session?.user?.email) {
+        showToast('Inicia sesión para unirte al repositorio.');
+        return;
+      }
+
+      try {
+        setJoiningRepoType(type);
+        const res = await fetch(`${API_BASE}/community/projects/${projectId}/repos/${type}/join`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userEmail: session.user.email }),
+        });
+        const data = await res.json().catch(() => ({}));
+
+        if (!res.ok) {
+          const message = data?.message || 'No se pudo enviar la solicitud.';
+          showToast(message);
+          return;
+        }
+
+        const nextState: RepoStatusState = data?.state || 'INVITED';
+        setRepoStatusByType((prev) => ({
+          ...prev,
+          [type]: {
+            ...(prev[type] || { type }),
+            state: nextState,
+            repoFullName: data?.repoFullName || prev[type]?.repoFullName,
+            repoUrl: data?.repoUrl || prev[type]?.repoUrl,
+          },
+        }));
+
+        showToast(nextState === 'ACTIVE' ? 'Ya estás unido a este repositorio.' : 'Solicitud enviada.');
+      } catch (err) {
+        console.error('[community] Error joining repo', err);
+        showToast('No se pudo enviar la solicitud.');
+      } finally {
+        setJoiningRepoType(null);
+      }
+    },
+    [API_BASE, projectId, session?.user?.email, showToast]
+  );
 
   const statusBadgeClasses: Record<string, string> = {
     TODO: 'bg-slate-200 text-slate-800',
@@ -461,6 +663,64 @@ export default function CommunityProjectBoardPage() {
           )}
         </div>
 
+        {orderedProjectRepos.length > 0 && (
+          <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-slate-800">Repositorios del proyecto</h3>
+            </div>
+            <div className="mt-3 grid gap-3 md:grid-cols-3">
+              {orderedProjectRepos.map((repo) => {
+                const status: RepoStatusState = repoStatusByType[repo.type]?.state || 'NONE';
+                const statusClass =
+                  status === 'ACTIVE'
+                    ? 'bg-emerald-100 text-emerald-800'
+                    : status === 'INVITED'
+                    ? 'bg-amber-100 text-amber-800'
+                    : 'bg-slate-200 text-slate-800';
+
+                const buttonLabel =
+                  status === 'NONE' ? 'Unirse' : status === 'INVITED' ? 'Invitado' : 'Unido';
+
+                const isJoinDisabled = status !== 'NONE' || !!joiningRepoType;
+
+                return (
+                  <div key={repo.type} className="rounded-lg bg-white p-4 shadow-sm">
+                    <div className="flex items-center justify-between gap-2">
+                      <div>
+                        <p className="text-xs font-semibold uppercase text-blue-600">
+                          {repoTypeLabels[repo.type] || repo.type}
+                        </p>
+                        <Link
+                          href={repo.htmlUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-sm font-semibold text-slate-900 hover:underline"
+                        >
+                          {repo.fullName}
+                        </Link>
+                      </div>
+                      <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${statusClass}`}>
+                        {status}
+                      </span>
+                    </div>
+                    <button
+                      disabled={isJoinDisabled}
+                      onClick={() => handleJoinRepo(repo.type)}
+                      className={`mt-3 w-full rounded-lg px-3 py-2 text-xs font-semibold transition ${
+                        status === 'NONE'
+                          ? 'bg-blue-600 text-white hover:bg-blue-700'
+                          : 'bg-slate-200 text-slate-600'
+                      } ${isJoinDisabled ? 'cursor-not-allowed opacity-70' : ''}`}
+                    >
+                      {joiningRepoType === repo.type ? 'Enviando…' : buttonLabel}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         {error && <p className="text-sm text-red-600">{error}</p>}
 
         {columns.length === 0 ? (
@@ -497,13 +757,25 @@ export default function CommunityProjectBoardPage() {
                         const taskId = resolveTaskId(task) || task.title;
                         const assigneeLabel =
                           task.assigneeName || task.assigneeEmail;
+                        const taskRepoType = resolveRepoType(task);
+                        const repoBadgeLabel = taskRepoType ? repoTypeLabels[taskRepoType] || taskRepoType : null;
+                        const taskIsEditable = canWorkOnTask(task);
 
                         return (
                           <div
                             key={taskId}
                             className="rounded-lg bg-white p-3 shadow-sm transition-all duration-300 ease-in-out hover:-translate-y-0.5 hover:shadow-md"
-                            draggable
-                            onDragStart={() => setDraggedTaskId(taskId)}
+                            draggable={taskIsEditable}
+                            onDragStart={(e) => {
+                              if (!taskIsEditable) {
+                                e.preventDefault();
+                                showToast(
+                                  `Debes unirte al repositorio ${repoBadgeLabel || 'asignado'} para mover esta tarea`
+                                );
+                                return;
+                              }
+                              setDraggedTaskId(taskId);
+                            }}
                             onDragEnd={() => setDraggedTaskId(null)}
                           >
                             <p className="font-semibold text-slate-900">{task.title}</p>
@@ -520,11 +792,11 @@ export default function CommunityProjectBoardPage() {
                                   {task.status.replace('_', ' ')}
                                 </span>
                               )}
-                              {task.verificationStatus && (
-                                <span
-                                  className={`rounded-full px-2 py-1 ${
-                                    verificationBadgeClasses[task.verificationStatus] || 'bg-slate-200 text-slate-800'
-                                  }`}
+                                  {task.verificationStatus && (
+                                    <span
+                                      className={`rounded-full px-2 py-1 ${
+                                        verificationBadgeClasses[task.verificationStatus] || 'bg-slate-200 text-slate-800'
+                                      }`}
                                 >
                                   {verificationBadgeLabel[task.verificationStatus] || task.verificationStatus}
                                 </span>
@@ -533,6 +805,11 @@ export default function CommunityProjectBoardPage() {
                             {assigneeLabel && (
                               <p className="mt-2 text-xs font-semibold text-blue-600">
                                 Asignada a: {assigneeLabel}
+                              </p>
+                            )}
+                            {repoBadgeLabel && (
+                              <p className="mt-2 text-xs font-semibold text-slate-600">
+                                Repo: <span className="rounded-full bg-slate-100 px-2 py-0.5 text-slate-800">{repoBadgeLabel}</span>
                               </p>
                             )}
                             <div className="mt-3 flex flex-wrap gap-2">
@@ -580,6 +857,12 @@ export default function CommunityProjectBoardPage() {
           </div>
         )}
       </div>
+
+      {toastMessage && (
+        <div className="fixed bottom-6 right-6 z-50 rounded-lg bg-slate-900 px-4 py-3 text-sm font-semibold text-white shadow-lg">
+          {toastMessage}
+        </div>
+      )}
 
       {submitModalTask && (
         <NoteModal
