@@ -65,6 +65,24 @@ export interface ProjectEstimation {
   openaiMeta?: unknown;
 }
 
+type TaskTag = "Backend" | "Frontend" | "Hardhat";
+
+function taskTag(task: GeneratedTask): TaskTag {
+  const v = String((task as any).verificationType || "").toUpperCase();
+
+  if (v === "SOLIDITY" || v === "WEB3") return "Hardhat";
+  if (v === "FRONTEND") return "Frontend";
+  if (v === "BACKEND") return "Backend";
+
+  // fallback por layer/category
+  const layer = String(task.layer || task.category || "").toUpperCase();
+  if (layer === "VIEW") return "Frontend";
+  if (layer === "SERVICE" || layer === "MODEL") return "Backend";
+
+  // por defecto: Backend (mejor que vacío)
+  return "Backend";
+}
+
 const formatPrice = (value: number) =>
   new Intl.NumberFormat('es-ES', {
     style: 'currency',
@@ -85,8 +103,8 @@ const getTaskHours = (task: GeneratedTask): number => {
 
   const rate =
     typeof task.hourlyRate === 'number' &&
-    !Number.isNaN(task.hourlyRate) &&
-    task.hourlyRate > 0
+      !Number.isNaN(task.hourlyRate) &&
+      task.hourlyRate > 0
       ? task.hourlyRate
       : 30;
 
@@ -94,8 +112,8 @@ const getTaskHours = (task: GeneratedTask): number => {
     typeof task.taskPrice === 'number' && !Number.isNaN(task.taskPrice)
       ? task.taskPrice
       : typeof task.price === 'number' && !Number.isNaN(task.price)
-      ? task.price
-      : 0;
+        ? task.price
+        : 0;
 
   return rawPrice / rate;
 };
@@ -119,7 +137,7 @@ const saveDraft = (draft: GeneratorDraft) => {
   if (typeof window === 'undefined') return;
   try {
     sessionStorage.setItem(DRAFT_KEY, JSON.stringify(draft));
-  } catch {}
+  } catch { }
 };
 
 const loadDraft = (): GeneratorDraft | null => {
@@ -137,7 +155,7 @@ const clearDraft = () => {
   if (typeof window === 'undefined') return;
   try {
     sessionStorage.removeItem(DRAFT_KEY);
-  } catch {}
+  } catch { }
 };
 
 // ============================
@@ -164,7 +182,16 @@ function openCenteredPopup(url: string) {
   return popup;
 }
 
-const STACK_SECTIONS: StackSection[] = DEFAULT_STACK_SECTIONS;
+const STACK_ALLOW_KEYS = new Set([
+  "frontend",
+  "backend",
+  "database",
+  "smartContracts",
+]);
+
+const STACK_SECTIONS: StackSection[] = DEFAULT_STACK_SECTIONS.filter((s) =>
+  STACK_ALLOW_KEYS.has(s.key)
+);
 
 const ensureStringArray = (value: unknown): string[] => {
   if (!value) return [];
@@ -228,7 +255,6 @@ const formatConfidence = (value?: number | null) => {
 
 const GENERATE_PATHS = [
   process.env.NEXT_PUBLIC_GENERATE_TASKS_PATH,
-  '/projects/generate-tasks',
   '/generate-tasks',
 ].filter(Boolean) as string[];
 
@@ -451,8 +477,8 @@ export default function GeneratorPage() {
     const url =
       `${API_BASE}/integrations/github/login` +
       `?userEmail=${encodeURIComponent(githubStatusEmail)}` +
-  `&returnTo=${encodeURIComponent('/tools/generator')}` +
-  `&popup=1`;
+      `&returnTo=${encodeURIComponent('/tools/generator')}` +
+      `&popup=1`;
 
     const popup = openCenteredPopup(url);
 
@@ -563,7 +589,7 @@ export default function GeneratorPage() {
         if (finalResponse.status === 402 && (data as any)?.error === 'subscription_required') {
           setError(
             (data as any).message ??
-              'Necesitas una suscripción activa de 30 €/mes para usar el generador.'
+            'Necesitas una suscripción activa de 30 €/mes para usar el generador.'
           );
           return;
         }
@@ -822,20 +848,23 @@ export default function GeneratorPage() {
               />
             </div>
 
-            {process.env.NODE_ENV !== 'production' && (stackInference || openAiMeta) && (
-              <details className="mt-3 rounded-lg border border-dashed border-slate-200 bg-slate-50/80 p-3 text-xs text-slate-700">
+            {process.env.NODE_ENV !== "production" && (!!stackInference || openAiMeta != null) && (
+              <details className="mt-3 rounded-lg border border-dashed border-slate-200 bg-slate-50/80 p-3">
                 <summary className="cursor-pointer text-sm font-semibold text-slate-800">
                   Ver detalle de stack (solo dev)
                 </summary>
+
                 <pre className="mt-2 whitespace-pre-wrap break-words text-[11px] leading-tight">
-                  {JSON.stringify(
-                    {
-                      stackInference,
-                      recommendedStack: stackDraft,
-                      openAiMeta,
-                    },
-                    null,
-                    2
+                  {String(
+                    JSON.stringify(
+                      {
+                        stackInference: (stackInference ?? null) as unknown,
+                        recommendedStack: stackDraft ?? null,
+                        openAiMeta: (openAiMeta ?? null) as unknown,
+                      },
+                      null,
+                      2
+                    )
                   )}
                 </pre>
               </details>
@@ -858,7 +887,13 @@ export default function GeneratorPage() {
                 <tbody>
                   {tasksToRender.map((task, index) => (
                     <tr key={task.id ?? index} className="border-b border-slate-100 align-top">
-                      <td className="px-4 py-2 font-semibold text-slate-900">{task.title}</td>
+                      <td className="px-4 py-2 font-semibold text-slate-900"><div className="flex flex-wrap items-center gap-2">
+                        <span>{task.title}</span>
+
+                        <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-800">
+                          {taskTag(task)}
+                        </span>
+                      </div></td>
                       <td className="px-4 py-2 text-slate-700">{task.description}</td>
                       <td className="px-4 py-2 text-slate-700">{task.category}</td>
                       <td className="px-4 py-2 text-slate-700">{task.complexity}</td>
