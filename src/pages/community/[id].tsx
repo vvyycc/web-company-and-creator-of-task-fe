@@ -566,10 +566,10 @@ function CommunityProjectCard(props: {
                     <div className="flex items-center gap-2">
                       <span
                         className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${status === 'ACTIVE'
-                            ? 'bg-emerald-100 text-emerald-700'
-                            : status === 'INVITED'
-                              ? 'bg-amber-100 text-amber-800'
-                              : 'bg-slate-100 text-slate-700'
+                          ? 'bg-emerald-100 text-emerald-700'
+                          : status === 'INVITED'
+                            ? 'bg-amber-100 text-amber-800'
+                            : 'bg-slate-100 text-slate-700'
                           }`}
                       >
                         {status}
@@ -878,10 +878,10 @@ export default function CommunityProjectBoard() {
                 >
                   <span
                     className={`mt-0.5 inline-flex h-4 w-4 items-center justify-center rounded border text-[10px] ${isPassed
-                        ? 'border-emerald-500 bg-emerald-50 text-emerald-600'
-                        : isFailed
-                          ? 'border-red-500 bg-red-50 text-red-600'
-                          : 'border-slate-300 bg-white text-slate-400'
+                      ? 'border-emerald-500 bg-emerald-50 text-emerald-600'
+                      : isFailed
+                        ? 'border-red-500 bg-red-50 text-red-600'
+                        : 'border-slate-300 bg-white text-slate-400'
                       }`}
                     title={status}
                   >
@@ -1528,7 +1528,7 @@ export default function CommunityProjectBoard() {
                         <article
                           key={task.id}
                           id={`task-${task.id}`}
-                          className="relative cursor-default rounded-xl bg-white p-4 text-sm shadow-sm ring-1 ring-slate-200"
+                          className="relative cursor-default rounded-xl bg-white p-4 pt-12 text-sm shadow-sm ring-1 ring-slate-200"
                           draggable={
                             session?.user?.email && canWorkOnTask(task) && task.columnId !== 'done' ? true : undefined
                           }
@@ -1556,16 +1556,8 @@ export default function CommunityProjectBoard() {
                             </span>
                           </div>
 
-                          <header className="mb-2 flex items-start justify-between gap-2 pr-16">
+                          <header className="mb-2 pr-16">
                             <h3 className="text-sm font-semibold text-slate-900">{task.title}</h3>
-                            <div className="flex items-center gap-2">
-                              <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-600">
-                                {task.layer}
-                              </span>
-                              <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[10px] font-semibold lowercase tracking-wide text-indigo-700">
-                                {taskRepoType}
-                              </span>
-                            </div>
                           </header>
 
                           {task.assigneeEmail && task.columnId !== 'todo' && (
