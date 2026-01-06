@@ -411,6 +411,20 @@ const getTaskRepoType = (task: BoardTask): 'backend' | 'frontend' | 'contracts' 
   return 'backend';
 };
 
+const mapRepoTypeLabel = (t: 'backend' | 'frontend' | 'contracts') =>
+  t === 'contracts' ? 'hardhat' : t;
+
+const getRepoTypePillClass = (label: 'backend' | 'frontend' | 'hardhat') => {
+  switch (label) {
+    case 'backend':
+      return 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200';
+    case 'frontend':
+      return 'bg-blue-50 text-blue-700 ring-1 ring-blue-200';
+    case 'hardhat':
+      return 'bg-amber-50 text-amber-800 ring-1 ring-amber-200';
+  }
+};
+
 // =====================================================
 // ✅ CommunityProjectCard (CABECERA)
 // CAMBIOS:
@@ -551,13 +565,12 @@ function CommunityProjectCard(props: {
                     </div>
                     <div className="flex items-center gap-2">
                       <span
-                        className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
-                          status === 'ACTIVE'
+                        className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${status === 'ACTIVE'
                             ? 'bg-emerald-100 text-emerald-700'
                             : status === 'INVITED'
                               ? 'bg-amber-100 text-amber-800'
                               : 'bg-slate-100 text-slate-700'
-                        }`}
+                          }`}
                       >
                         {status}
                       </span>
@@ -710,9 +723,8 @@ function CommunityProjectCard(props: {
 
       {(actionMessage != null || actionError != null) && (
         <div
-          className={`mt-4 rounded-lg border px-4 py-3 text-xs ${
-            actionMessage ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-red-200 bg-red-50 text-red-700'
-          }`}
+          className={`mt-4 rounded-lg border px-4 py-3 text-xs ${actionMessage ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-red-200 bg-red-50 text-red-700'
+            }`}
         >
           {toText(actionMessage ?? actionError)}
         </div>
@@ -728,11 +740,11 @@ function TaskDescription({ text }: { text: string }) {
   const clampStyle = expanded
     ? undefined
     : {
-        display: '-webkit-box',
-        WebkitLineClamp: 2,
-        WebkitBoxOrient: 'vertical' as const,
-        overflow: 'hidden',
-      };
+      display: '-webkit-box',
+      WebkitLineClamp: 2,
+      WebkitBoxOrient: 'vertical' as const,
+      overflow: 'hidden',
+    };
 
   return (
     <div className="mb-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
@@ -865,13 +877,12 @@ export default function CommunityProjectBoard() {
                   className="flex items-start gap-2 rounded-md px-1 py-1"
                 >
                   <span
-                    className={`mt-0.5 inline-flex h-4 w-4 items-center justify-center rounded border text-[10px] ${
-                      isPassed
+                    className={`mt-0.5 inline-flex h-4 w-4 items-center justify-center rounded border text-[10px] ${isPassed
                         ? 'border-emerald-500 bg-emerald-50 text-emerald-600'
                         : isFailed
                           ? 'border-red-500 bg-red-50 text-red-600'
                           : 'border-slate-300 bg-white text-slate-400'
-                    }`}
+                      }`}
                     title={status}
                   >
                     {showIcon ? visuals.icon : ''}
@@ -1200,8 +1211,8 @@ export default function CommunityProjectBoard() {
           }
           throw new Error(
             mapRepoError((data as any).error, taskRepoType) ||
-              (data as any).error ||
-              'No se pudo marcar la tarea como hecha'
+            (data as any).error ||
+            'No se pudo marcar la tarea como hecha'
           );
         }
 
@@ -1226,8 +1237,8 @@ export default function CommunityProjectBoard() {
           }
           throw new Error(
             mapRepoError((data as any).error, taskRepoType) ||
-              (data as any).error ||
-              'No se pudo desasignar la tarea'
+            (data as any).error ||
+            'No se pudo desasignar la tarea'
           );
         }
 
@@ -1524,6 +1535,21 @@ export default function CommunityProjectBoard() {
                           onDragStart={() => handleDragStart(task.id, task.columnId)}
                           onDragEnd={() => setDraggedTaskId(null)}
                         >
+                          {(() => {
+                            const repoType = getTaskRepoType(task); // backend | frontend | contracts
+                            const label = mapRepoTypeLabel(repoType); // backend | frontend | hardhat
+                            return (
+                              <div className="absolute left-1/2 top-3 -translate-x-1/2">
+                                <span
+                                  className={`rounded-full px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide ${getRepoTypePillClass(
+                                    label
+                                  )}`}
+                                >
+                                  {label}
+                                </span>
+                              </div>
+                            );
+                          })()}
                           <div className="absolute right-3 top-3">
                             <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${badge.className}`}>
                               {badge.label}
