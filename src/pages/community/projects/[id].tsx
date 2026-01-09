@@ -1,3 +1,4 @@
+import { useSession } from 'next-auth/react';
 import Link from 'next/link';
 import { useRouter } from 'next/router';
 import { useEffect, useMemo, useState } from 'react';
@@ -17,6 +18,7 @@ type CommunityProject = {
   id: string;
   title: string;
   description?: string;
+  ownerEmail?: string;
   tasks?: CommunityTask[];
   totalTasksPrice: number;
   platformFeePercent: number;
@@ -26,12 +28,15 @@ type CommunityProject = {
 const API_BASE = 'http://localhost:4000';
 
 export default function CommunityProjectDetailPage() {
+  const { data: session } = useSession();
   const router = useRouter();
   const { id } = router.query;
 
   const [project, setProject] = useState<CommunityProject | null>(null);
   const [loading, setLoading] = useState(true);
   const [errorCode, setErrorCode] = useState<number | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     if (!router.isReady || typeof id !== 'string') return;
@@ -85,6 +90,57 @@ export default function CommunityProjectDetailPage() {
   const formatDate = (value?: string) =>
     value ? new Date(value).toLocaleDateString() : 'Fecha no disponible';
 
+  const handleDelete = async () => {
+    if (!project?.id || !session?.user?.email) return;
+
+    const confirmed = window.confirm(
+      '¿Seguro que quieres borrar este proyecto? Esta acción no se puede deshacer.'
+    );
+
+    if (!confirmed) return;
+
+    try {
+      setDeleting(true);
+      setDeleteError(null);
+
+      const res = await fetch(`${API_BASE}/projects/${project.id}`, {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-user-email': session.user.email,
+        },
+      });
+
+      if (res.status === 404) {
+        setDeleteError('Proyecto no encontrado.');
+        return;
+      }
+
+      if (res.status === 403) {
+        setDeleteError('No tienes permisos para borrar este proyecto.');
+        return;
+      }
+
+      if (res.status === 409) {
+        setDeleteError('Este proyecto está publicado. Despublícalo antes de borrarlo.');
+        return;
+      }
+
+      if (!res.ok) {
+        setDeleteError('No se pudo borrar el proyecto. Inténtalo de nuevo más tarde.');
+        return;
+      }
+
+      window.alert('Proyecto borrado correctamente.');
+      router.push('/dashboard');
+    } catch (err) {
+      console.error('[community] Error deleting project', err);
+      setDeleteError('Ocurrió un error inesperado. Inténtalo de nuevo.');
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   if (loading) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-slate-50 p-6">
@@ -136,7 +192,21 @@ export default function CommunityProjectDetailPage() {
           >
             Volver al listado
           </Link>
+          {session?.user?.email && project.ownerEmail === session.user.email ? (
+            <button
+              type="button"
+              onClick={handleDelete}
+              disabled={deleting}
+              className="bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700 disabled:opacity-50"
+            >
+              {deleting ? 'Borrando…' : 'Borrar proyecto'}
+            </button>
+          ) : null}
         </div>
+
+        {deleteError ? (
+          <p className="text-sm text-red-400">{deleteError}</p>
+        ) : null}
 
         <div className="overflow-x-auto rounded-xl border border-slate-200">
           {derivedData.tasks.length > 0 ? (
